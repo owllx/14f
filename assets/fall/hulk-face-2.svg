@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 240" role="img" aria-label="Gamma hero sticker 2">
+  <g fill="none" fill-rule="evenodd">
+    <path d="M30 220c12-30 36-47 80-47 43 0 67 17 80 47" fill="#24402A"/>
+    <ellipse cx="110" cy="112" rx="64" ry="68" fill="#59CF4E"/>
+    <path d="M45 95c8-37 28-58 65-58 38 0 56 20 65 58-23-14-46-16-65-6-19-10-41-9-65 6Z" fill="#1C2C21"/>
+    <rect x="66" y="108" width="36" height="12" rx="6" fill="#132018"/>
+    <rect x="118" y="108" width="36" height="12" rx="6" fill="#132018"/>
+    <rect x="76" y="140" width="68" height="16" rx="8" fill="#132018"/>
+    <rect x="82" y="144" width="10" height="8" rx="4" fill="#63DB55"/>
+    <rect x="128" y="144" width="10" height="8" rx="4" fill="#63DB55"/>
+    <path d="M110 32l8 11 13 3-9 9 2 13-14-7-13 7 2-13-9-9 13-3z" fill="#A6FF9A"/>
+  </g>
+</svg>

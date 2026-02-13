@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 240" role="img" aria-label="Scarlet agent sticker 2">
+  <g fill="none" fill-rule="evenodd">
+    <path d="M28 220c15-31 42-49 82-49s67 18 82 49" fill="#131A21"/>
+    <ellipse cx="110" cy="110" rx="60" ry="65" fill="#F3C5AA"/>
+    <path d="M46 103c8-50 29-71 64-71s55 21 64 71c-19-13-40-20-64-20s-45 7-64 20Z" fill="#A92B3C"/>
+    <path d="M71 114h23" stroke="#242932" stroke-width="7" stroke-linecap="round"/>
+    <path d="M124 117c8-7 16-7 24 0" stroke="#242932" stroke-width="7" stroke-linecap="round"/>
+    <circle cx="81" cy="123" r="4" fill="#282D36"/>
+    <path d="M89 152c12 7 30 7 42 0" stroke="#B63045" stroke-width="6" stroke-linecap="round"/>
+    <circle cx="153" cy="66" r="14" fill="#FF6E86"/>
+    <path d="M153 58v16M145 66h16" stroke="#fff" stroke-width="4" stroke-linecap="round"/>
+  </g>
+</svg>

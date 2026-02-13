@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 240" role="img" aria-label="Scarlet agent emblem sticker">
+  <g fill="none" fill-rule="evenodd">
+    <circle cx="110" cy="120" r="84" fill="#171C23"/>
+    <circle cx="110" cy="120" r="79" stroke="#F05A72" stroke-width="6"/>
+    <path d="M110 68c-25 0-40 17-40 38 0 16 9 27 24 34-15 7-24 18-24 33 0 23 16 39 40 39s40-16 40-39c0-15-9-26-24-33 15-7 24-18 24-34 0-21-15-38-40-38Z" fill="#D63F56"/>
+    <circle cx="110" cy="120" r="17" fill="#F7CED2"/>
+    <path d="M110 44l7 10 12 3-8 8 2 12-11-6-11 6 2-12-8-8 12-3z" fill="#FF9AA8"/>
+    <path d="M48 184c18 16 39 24 62 24s44-8 62-24" stroke="#F05A72" stroke-width="6" stroke-linecap="round" opacity=".8"/>
+  </g>
+</svg>

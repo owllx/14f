@@ -1,0 +1,51 @@
+<svg width="1280" height="800" viewBox="0 0 1280 800" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Зеленая тематическая иллюстрация с сердцем">
+  <defs>
+    <linearGradient id="bgGamma" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#111a16"/>
+      <stop offset="100%" stop-color="#0a120f"/>
+    </linearGradient>
+    <linearGradient id="ringGamma" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#64e56a"/>
+      <stop offset="100%" stop-color="#1c8334"/>
+    </linearGradient>
+    <radialGradient id="pulseGamma" cx="50%" cy="45%" r="55%">
+      <stop offset="0%" stop-color="#82ff88" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#1f8b38" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="softGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="800" fill="url(#bgGamma)"/>
+  <circle cx="640" cy="400" r="300" fill="url(#pulseGamma)"/>
+
+  <g opacity="0.22">
+    <path d="M0 650 L1280 220" stroke="#7cff82" stroke-width="2"/>
+    <path d="M0 730 L1280 300" stroke="#7cff82" stroke-width="2"/>
+    <path d="M0 570 L1280 140" stroke="#7cff82" stroke-width="2"/>
+  </g>
+
+  <g fill="none" stroke="url(#ringGamma)" stroke-width="20">
+    <circle cx="640" cy="400" r="250" opacity="0.6"/>
+    <circle cx="640" cy="400" r="210" opacity="0.4"/>
+  </g>
+
+  <g filter="url(#softGlow)">
+    <path d="M640 520 C515 426 438 364 438 289 C438 225 491 180 556 180 C603 180 636 200 640 236 C644 200 678 180 726 180 C790 180 842 225 842 289 C842 364 766 426 640 520 Z"
+      fill="#7cff84" stroke="#d2ffd6" stroke-width="5"/>
+  </g>
+
+  <g transform="translate(270 430)">
+    <path d="M60 180 L220 130 L255 50 L360 0 L520 15 L560 90 L540 190 L430 250 L250 260 L110 230 Z"
+      fill="#2ea74b" stroke="#9ef9a8" stroke-width="6"/>
+    <path d="M245 44 L290 176 M315 30 L358 171 M386 29 L425 168" stroke="#125924" stroke-width="11" stroke-linecap="round"/>
+  </g>
+
+  <text x="68" y="86" font-size="56" font-family="Arial, sans-serif" fill="#d6ffda" opacity="0.92" font-weight="700">LOVE POWER</text>
+  <text x="70" y="145" font-size="28" font-family="Arial, sans-serif" fill="#9de9a8" opacity="0.9">14.02 // Heart Signal: Stable</text>
+</svg>

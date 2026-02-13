@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 240" role="img" aria-label="Scarlet agent bust sticker">
+  <g fill="none" fill-rule="evenodd">
+    <path d="M26 219c18-39 46-59 84-59s66 20 84 59" fill="#111821"/>
+    <rect x="70" y="142" width="80" height="44" rx="18" fill="#1A222D"/>
+    <ellipse cx="110" cy="92" rx="56" ry="60" fill="#F5C9AF"/>
+    <path d="M54 87c8-36 27-58 56-58 30 0 49 22 56 58-20-14-39-17-56-10-18-7-37-4-56 10Z" fill="#A62A3C"/>
+    <path d="M73 106h22M125 106h22" stroke="#262B33" stroke-width="7" stroke-linecap="round"/>
+    <path d="M87 135c7 7 15 11 23 11s16-4 23-11" stroke="#B23146" stroke-width="6" stroke-linecap="round"/>
+    <path d="M52 195h116" stroke="#FF7990" stroke-width="8" stroke-linecap="round" opacity=".85"/>
+  </g>
+</svg>

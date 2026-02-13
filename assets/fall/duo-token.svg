@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 240" role="img" aria-label="Duo token sticker">
+  <g fill="none" fill-rule="evenodd">
+    <circle cx="110" cy="120" r="86" fill="#131A1E"/>
+    <path d="M110 36c47 0 84 37 84 84s-37 84-84 84V36Z" fill="#B33245"/>
+    <path d="M110 36c-47 0-84 37-84 84s37 84 84 84V36Z" fill="#3AAB4B"/>
+    <path d="M110 70c14-16 41-6 41 15 0 23-19 32-41 49-22-17-41-26-41-49 0-21 27-31 41-15Z" fill="#FFE6EA"/>
+    <path d="M63 171c11-13 27-19 47-19s36 6 47 19" stroke="#F6F9FA" stroke-width="6" stroke-linecap="round" opacity=".85"/>
+    <path d="M46 120h128" stroke="#0F1418" stroke-width="4" opacity=".5"/>
+    <path d="M110 34l6 9 11 2-7 8 1 11-11-6-10 6 1-11-7-8 11-2z" fill="#FFF" opacity=".9"/>
+  </g>
+</svg>

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 240" role="img" aria-label="Gamma hero heart sticker">
+  <g fill="none" fill-rule="evenodd">
+    <path d="M110 210C58 174 26 151 26 106c0-37 28-63 63-63 22 0 37 9 47 25 10-16 25-25 47-25 35 0 63 26 63 63 0 45-32 68-84 104l-26 18-26-18Z" transform="translate(-13 0)" fill="#59CF4E"/>
+    <path d="M110 61v122" stroke="#1E5F28" stroke-width="9" stroke-linecap="round"/>
+    <path d="M110 122l-18 25 18 22-16 24" stroke="#184C21" stroke-width="7" stroke-linecap="round"/>
+    <circle cx="68" cy="97" r="12" fill="#9BFF8D"/>
+    <circle cx="154" cy="97" r="12" fill="#9BFF8D"/>
+  </g>
+</svg>

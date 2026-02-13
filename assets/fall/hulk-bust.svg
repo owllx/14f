@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 240" role="img" aria-label="Gamma hero bust sticker">
+  <g fill="none" fill-rule="evenodd">
+    <path d="M27 218c20-40 49-60 83-60s63 20 83 60" fill="#1E3524"/>
+    <rect x="74" y="136" width="72" height="42" rx="18" fill="#4BBE43"/>
+    <ellipse cx="110" cy="92" rx="58" ry="60" fill="#63DB55"/>
+    <path d="M57 84c6-33 23-54 53-54 30 0 48 19 53 54-21-16-39-18-53-9-16-10-34-8-53 9Z" fill="#1B2C21"/>
+    <path d="M70 104h24M126 104h24" stroke="#1A2A1E" stroke-width="8" stroke-linecap="round"/>
+    <path d="M84 136c8 9 18 13 26 13s18-4 26-13" stroke="#1A2A1E" stroke-width="7" stroke-linecap="round"/>
+    <path d="M54 194h112" stroke="#8BFF7A" stroke-width="10" stroke-linecap="round" opacity=".85"/>
+  </g>
+</svg>

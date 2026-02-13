@@ -1,0 +1,53 @@
+<svg width="1280" height="800" viewBox="0 0 1280 800" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Красная тематическая иллюстрация с сердцем">
+  <defs>
+    <linearGradient id="bgScarlet" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#180d12"/>
+      <stop offset="100%" stop-color="#11090d"/>
+    </linearGradient>
+    <linearGradient id="lineScarlet" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ff6b80"/>
+      <stop offset="100%" stop-color="#9f2338"/>
+    </linearGradient>
+    <radialGradient id="pulseScarlet" cx="52%" cy="42%" r="58%">
+      <stop offset="0%" stop-color="#ff7088" stop-opacity="0.8"/>
+      <stop offset="100%" stop-color="#922134" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="scarletGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="800" fill="url(#bgScarlet)"/>
+  <circle cx="640" cy="400" r="320" fill="url(#pulseScarlet)"/>
+
+  <g opacity="0.25">
+    <path d="M80 120 H1200" stroke="#f2758b" stroke-width="2"/>
+    <path d="M80 680 H1200" stroke="#f2758b" stroke-width="2"/>
+    <path d="M120 220 H1160" stroke="#f2758b" stroke-width="1.5"/>
+    <path d="M120 580 H1160" stroke="#f2758b" stroke-width="1.5"/>
+  </g>
+
+  <g fill="none" stroke="url(#lineScarlet)" stroke-width="18">
+    <path d="M450 190 C560 210 560 330 450 350 C560 370 560 490 450 510" opacity="0.7"/>
+    <path d="M830 190 C720 210 720 330 830 350 C720 370 720 490 830 510" opacity="0.7"/>
+  </g>
+
+  <g filter="url(#scarletGlow)">
+    <path d="M640 525 C502 422 415 353 415 270 C415 198 473 145 548 145 C600 145 635 170 640 211 C645 170 681 145 733 145 C808 145 865 198 865 270 C865 353 778 422 640 525 Z"
+      fill="#ff5f78" stroke="#ffd1d8" stroke-width="5"/>
+  </g>
+
+  <g transform="translate(318 430)" fill="none" stroke="url(#lineScarlet)" stroke-width="12">
+    <path d="M140 0 L0 160 L140 320"/>
+    <path d="M500 0 L640 160 L500 320"/>
+    <path d="M230 40 L320 160 L230 280"/>
+    <path d="M410 40 L320 160 L410 280"/>
+  </g>
+
+  <text x="68" y="86" font-size="56" font-family="Arial, sans-serif" fill="#ffd2da" opacity="0.96" font-weight="700">LOVE TACTICS</text>
+  <text x="70" y="145" font-size="28" font-family="Arial, sans-serif" fill="#f1a3b0" opacity="0.94">14.02 // Emotion Level: Maximum</text>
+</svg>

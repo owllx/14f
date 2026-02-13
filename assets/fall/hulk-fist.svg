@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 240" role="img" aria-label="Gamma hero fist sticker">
+  <g fill="none" fill-rule="evenodd">
+    <path d="M40 174c0-29 21-51 45-51h58c17 0 29 12 29 30v9c0 26-19 47-43 47H82c-23 0-42-15-42-35Z" fill="#58CD4D"/>
+    <rect x="56" y="98" width="28" height="40" rx="12" fill="#66E35B"/>
+    <rect x="84" y="92" width="28" height="44" rx="12" fill="#6AE95F"/>
+    <rect x="112" y="89" width="28" height="47" rx="12" fill="#63DB55"/>
+    <rect x="140" y="97" width="24" height="39" rx="12" fill="#58CD4D"/>
+    <path d="M36 182c14 19 34 29 60 29h35c26 0 48-13 59-34" stroke="#1B2C20" stroke-width="8" stroke-linecap="round"/>
+    <path d="M110 72c18-18 46-6 46 17 0 26-24 35-46 55-22-20-46-29-46-55 0-23 28-35 46-17Z" fill="#A9FF9F"/>
+    <path d="M110 72v72" stroke="#2D7B35" stroke-width="6"/>
+  </g>
+</svg>
