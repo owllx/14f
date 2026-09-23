@@ -127,8 +127,6 @@
   .row.avg .v{font-size:2.5rem;}
   .row.flash{border-color:var(--c); background:color-mix(in srgb,var(--c) 8%,var(--card));}
 
-  .hint{margin:16px 0 0; text-align:center; color:var(--faint); font-size:.8rem;}
-  .hint kbd{font:500 .75rem var(--mono); border:1px solid var(--line-2); border-bottom-width:2px; border-radius:5px; padding:0 5px; color:var(--muted);}
 
   .toast{
     position:fixed; left:50%; bottom:24px; z-index:20; transform:translate(-50%,16px); opacity:0;
@@ -146,7 +144,6 @@
     .row .v{font-size:1.6rem;}
     .row.avg .v{font-size:2rem;}
     .tab{font-size:.88rem;}
-    .hint .keys{display:none;}
   }
   @media (prefers-reduced-motion:reduce){ *{transition:none!important;} }
 </style>
@@ -188,7 +185,6 @@
     <div class="row y"><span class="badge">Y</span><span class="lbl"></span><span class="v vy">—</span><svg class="cp"><use href="#i-copy"/></svg></div>
     <div class="row z"><span class="badge">Z</span><span class="lbl"><small class="fp">+450</small></span><span class="v vz">—</span><svg class="cp"><use href="#i-copy"/></svg></div>
   </div>
-  <p class="hint">Натисни на число, щоб скопіювати<span class="keys"> · вкладки <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></span></p>
 </main>
 
 <!-- ── Вкладка 2: ±зсув (500) ── -->
@@ -209,7 +205,6 @@
     <div class="row y"><span class="badge">Y</span><span class="lbl"></span><span class="v vy">—</span><svg class="cp"><use href="#i-copy"/></svg></div>
     <div class="row z"><span class="badge">Z</span><span class="lbl"><small class="fp">+500</small></span><span class="v vz">—</span><svg class="cp"><use href="#i-copy"/></svg></div>
   </div>
-  <p class="hint">Натисни на число, щоб скопіювати<span class="keys"> · вкладки <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></span></p>
 </main>
 
 <!-- ── Вкладка 3: середнє ── -->
@@ -228,7 +223,6 @@
   <div class="out">
     <div class="row avg"><span class="lbl"><b>Результат</b></span><span class="v" id="vavg">—</span><svg class="cp"><use href="#i-copy"/></svg></div>
   </div>
-  <p class="hint">Натисни на число, щоб скопіювати<span class="keys"> · вкладки <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></span></p>
 </main>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
