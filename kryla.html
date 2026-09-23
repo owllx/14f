@@ -134,8 +134,6 @@
   .tile.y{border-color:rgba(255,180,84,.28);}
   .tile.avg{--c:var(--violet); border-color:rgba(185,155,255,.30); padding:22px 18px;}
   .tile.avg .v{font-size:2.8rem;}
-  .tile.half{--c:var(--muted);}
-  .tile.half .v{font-size:1.5rem;}
 
   footer{margin-top:18px; color:var(--faint); font-size:.72rem; letter-spacing:.14em; text-transform:uppercase; text-align:center;}
 
@@ -258,7 +256,6 @@
   </div>
   <div class="readouts">
     <div class="tile avg"><div class="meta"><span class="k">(А+Б)÷2</span></div><span class="v" id="vavg">—</span></div>
-    <div class="tile half"><div class="meta"><span class="k">±</span><span class="f">половина різниці</span></div><span class="v" id="vhalf">—</span></div>
   </div>
   <footer>Введи два числа — середнє рахується автоматично · клік по числу — копіює</footer>
 </main>
@@ -317,12 +314,12 @@
 
   /* ── вкладка 3: середнє ── */
   var aEl=document.getElementById('a'), bEl=document.getElementById('b');
-  var avg=counter(document.getElementById('vavg')), half=counter(document.getElementById('vhalf'));
+  var avg=counter(document.getElementById('vavg'));
   function calcAvg(){
     var ar=aEl.value.trim(), br=bEl.value.trim();
-    if(ar===''||br===''){ avg.clear(); half.clear(); return; }
+    if(ar===''||br===''){ avg.clear(); return; }
     var a=parseFloat(ar)||0, b=parseFloat(br)||0;
-    avg.set(Math.round((a+b)/2)); half.set(Math.abs(b-a)/2);
+    avg.set(Math.round((a+b)/2));
   }
   aEl.addEventListener('input',calcAvg); bEl.addEventListener('input',calcAvg);
 
