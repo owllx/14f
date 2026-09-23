@@ -337,35 +337,62 @@
     });
   });
 
-  /* ── логотипи на фоні: повільно літають і відбиваються від країв ── */
+  /* ── логотипи на фоні: літають, відбиваються від країв і один від одного ── */
   (function(){
-    var sky=document.getElementById('sky'), items=[], N=7;
+    var sky=document.getElementById('sky'), items=[];
+    /* кількість залежить від розміру екрана */
+    var N=Math.max(12,Math.min(30,Math.round(innerWidth*innerHeight/45000)));
+    function fits(x,y,R){
+      if(x<R||y<R||x>innerWidth-R||y>innerHeight-R) return false;
+      for(var j=0;j<items.length;j++){ var o=items[j], dx=o.x-x, dy=o.y-y; if(dx*dx+dy*dy<(o.R+R+4)*(o.R+R+4)) return false; }
+      return true;
+    }
     for(var i=0;i<N;i++){
+      var size=50+Math.random()*70, h=size*280/260, R=h*.46, x, y, t=0;
+      do{ x=R+Math.random()*(innerWidth-2*R); y=R+Math.random()*(innerHeight-2*R); }while(!fits(x,y,R)&&++t<200);
+      if(t>=200) continue; /* місця не лишилось */
       var el=document.createElement('div'); el.className='logo';
-      var size=70+Math.random()*90;
       el.style.setProperty('--s',size+'px'); el.style.setProperty('--c','var(--l'+(i%7+1)+')');
       sky.appendChild(el);
-      var ang=Math.random()*Math.PI*2, sp=18+Math.random()*22; /* px/сек */
-      items.push({el:el, w:size, h:size*280/260,
-        x:Math.random()*(innerWidth-size), y:Math.random()*(innerHeight-size),
+      var ang=Math.random()*Math.PI*2, sp=25+Math.random()*30; /* px/сек */
+      items.push({el:el, w:size, h:h, R:R, m:R*R, x:x, y:y,
         vx:Math.cos(ang)*sp, vy:Math.sin(ang)*sp,
         r:Math.random()*360, vr:(Math.random()<.5?-1:1)*(6+Math.random()*14)});
     }
-    function place(it){ it.el.style.transform='translate('+it.x+'px,'+it.y+'px) rotate('+it.r+'deg)'; }
+    /* x,y — центр логотипа */
+    function place(it){ it.el.style.transform='translate('+(it.x-it.w/2)+'px,'+(it.y-it.h/2)+'px) rotate('+it.r+'deg)'; }
     items.forEach(place);
     if(reduce) return;
+
+    function collide(a,b){
+      var dx=b.x-a.x, dy=b.y-a.y, d2=dx*dx+dy*dy, min=a.R+b.R;
+      if(d2>=min*min||d2===0) return;
+      var d=Math.sqrt(d2), nx=dx/d, ny=dy/d;
+      /* розсунути, щоб не злипались */
+      var push=(min-d)/(a.m+b.m);
+      a.x-=nx*push*b.m; a.y-=ny*push*b.m; b.x+=nx*push*a.m; b.y+=ny*push*a.m;
+      /* пружний удар уздовж лінії центрів */
+      var rv=(b.vx-a.vx)*nx+(b.vy-a.vy)*ny;
+      if(rv>0) return; /* вже розлітаються */
+      var j=-2*rv/(1/a.m+1/b.m);
+      a.vx-=j*nx/a.m; a.vy-=j*ny/a.m; b.vx+=j*nx/b.m; b.vy+=j*ny/b.m;
+      a.vr=-a.vr; b.vr=-b.vr;
+    }
+
     var last=performance.now();
     function tick(now){
       var dt=Math.min(.05,(now-last)/1000); last=now;
-      var W=innerWidth, H=innerHeight;
-      items.forEach(function(it){
-        it.x+=it.vx*dt; it.y+=it.vy*dt; it.r+=it.vr*dt;
-        if(it.x<-it.w*.2){ it.x=-it.w*.2; it.vx=Math.abs(it.vx); }
-        if(it.x>W-it.w*.8){ it.x=W-it.w*.8; it.vx=-Math.abs(it.vx); }
-        if(it.y<-it.h*.2){ it.y=-it.h*.2; it.vy=Math.abs(it.vy); }
-        if(it.y>H-it.h*.8){ it.y=H-it.h*.8; it.vy=-Math.abs(it.vy); }
+      var W=innerWidth, H=innerHeight, n=items.length, i, k, it;
+      for(i=0;i<n;i++){ it=items[i]; it.x+=it.vx*dt; it.y+=it.vy*dt; it.r+=it.vr*dt; }
+      for(i=0;i<n;i++) for(k=i+1;k<n;k++) collide(items[i],items[k]);
+      for(i=0;i<n;i++){
+        it=items[i];
+        if(it.x<it.R){ it.x=it.R; it.vx=Math.abs(it.vx); }
+        if(it.x>W-it.R){ it.x=W-it.R; it.vx=-Math.abs(it.vx); }
+        if(it.y<it.R){ it.y=it.R; it.vy=Math.abs(it.vy); }
+        if(it.y>H-it.R){ it.y=H-it.R; it.vy=-Math.abs(it.vy); }
         place(it);
-      });
+      }
       requestAnimationFrame(tick);
     }
     requestAnimationFrame(tick);
