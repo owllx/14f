@@ -3,261 +3,232 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>КРИЛА — калькулятор</title>
+<title>Крила — калькулятор</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet" />
 <style>
   :root{
-    --bg:#05080d; --bg2:#0a1018;
-    --panel:rgba(14,20,28,.72); --stroke:rgba(120,170,200,.16); --stroke-2:rgba(120,170,200,.30);
-    --ink:#dbe8f0; --muted:#7d93a4; --faint:#4a5b68;
-    --amber:#ffb454;            /* приціл / базове Y */
-    --cyan:#46c8ff;             /* X = Y − зсув */
-    --green:#57e39a;            /* Z = Y + зсув */
-    --violet:#b99bff;           /* середнє */
-    --mono:'Share Tech Mono',ui-monospace,Consolas,monospace;
-    --disp:'Rajdhani','Segoe UI',system-ui,sans-serif;
-    --tabs-h:64px;
+    --bg:#f4f5f8; --card:#ffffff; --field:#f7f8fa;
+    --line:#e6e8ee; --line-2:#d5d9e2;
+    --ink:#12151c; --muted:#6b7280; --faint:#a1a7b3;
+    --accent:#3b5bfd; --accent-soft:rgba(59,91,253,.10);
+    --minus:#0ea5e9; --base:#f59e0b; --plus:#10b981; --avg:#8b5cf6;
+    --shadow:0 1px 2px rgba(16,24,40,.04), 0 8px 24px -8px rgba(16,24,40,.10);
+    --sans:'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+    --mono:'JetBrains Mono',ui-monospace,Consolas,monospace;
+    --bar-h:68px;
+    color-scheme:light;
+  }
+  :root[data-theme="dark"]{
+    --bg:#0b0d12; --card:#14171f; --field:#1b1f29;
+    --line:#252a36; --line-2:#323846;
+    --ink:#eef0f4; --muted:#9aa2b1; --faint:#5f6776;
+    --accent:#6b85ff; --accent-soft:rgba(107,133,255,.16);
+    --shadow:0 1px 2px rgba(0,0,0,.3), 0 12px 32px -12px rgba(0,0,0,.6);
+    color-scheme:dark;
   }
   *{box-sizing:border-box;}
-  html,body{min-height:100%;}
   body{
-    margin:0; background:radial-gradient(120% 90% at 50% -10%, #0d1622 0%, var(--bg) 60%) fixed, var(--bg);
-    color:var(--ink); font-family:var(--disp);
-    display:flex; align-items:flex-start; justify-content:center;
-    padding:calc(var(--tabs-h) + 28px) 16px 24px;
-    -webkit-font-smoothing:antialiased; overflow-x:hidden; min-height:100vh;
+    margin:0; min-height:100vh; background:var(--bg); color:var(--ink);
+    font-family:var(--sans); -webkit-font-smoothing:antialiased;
+    padding:calc(var(--bar-h) + 24px) 16px 32px;
+    transition:background .2s, color .2s;
   }
-  #radar{position:fixed; inset:0; z-index:0; opacity:.5; pointer-events:none;}
 
-  /* ── закріплені вкладки зверху ── */
-  .tabs{
-    position:fixed; top:0; left:0; right:0; z-index:10;
-    display:flex; justify-content:center; gap:8px;
-    padding:10px 12px; height:var(--tabs-h);
-    background:rgba(5,8,13,.86); border-bottom:1px solid var(--stroke-2);
-    backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
+  /* ── закріплена панель вкладок ── */
+  .bar{
+    position:fixed; top:0; left:0; right:0; z-index:10; height:var(--bar-h);
+    display:flex; align-items:center; justify-content:center; gap:10px; padding:0 12px;
+    background:color-mix(in srgb,var(--bg) 82%,transparent);
+    border-bottom:1px solid var(--line);
+    backdrop-filter:saturate(1.6) blur(14px); -webkit-backdrop-filter:saturate(1.6) blur(14px);
+  }
+  .seg{
+    display:flex; gap:4px; padding:4px; width:min(480px,100%);
+    background:var(--card); border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow);
   }
   .tab{
-    flex:1 1 0; max-width:190px; min-width:0;
-    display:flex; align-items:center; justify-content:center; gap:8px;
-    border:1px solid var(--stroke-2); border-radius:12px; background:#080d13;
-    color:var(--muted); font-family:var(--disp); font-weight:700; font-size:1.05rem;
-    letter-spacing:.08em; text-transform:uppercase; cursor:pointer;
-    transition:color .15s, border-color .15s, background .15s, box-shadow .15s;
-    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; padding:0 10px;
+    flex:1 1 0; min-width:0; height:40px; border:0; border-radius:10px;
+    background:transparent; color:var(--muted); cursor:pointer;
+    font:600 .95rem var(--sans); letter-spacing:-.01em; white-space:nowrap;
+    display:flex; align-items:center; justify-content:center; gap:6px;
+    transition:background .15s, color .15s;
   }
-  .tab .n{font-family:var(--mono); font-size:1.15rem; letter-spacing:0;}
-  .tab .hk{font-family:var(--mono); font-size:.72rem; color:var(--faint); border:1px solid var(--stroke); border-radius:5px; padding:1px 5px;}
-  .tab:hover{color:var(--ink); border-color:var(--c);}
-  .tab[aria-selected="true"]{
-    color:#05080d; background:var(--c); border-color:var(--c);
-    box-shadow:0 0 22px -4px var(--c);
+  .tab .n{font-family:var(--mono); font-weight:600;}
+  .tab:hover{color:var(--ink); background:var(--field);}
+  .tab[aria-selected="true"]{background:var(--ink); color:var(--card);}
+  .tab:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+  .theme{
+    flex:none; width:44px; height:44px; border-radius:12px; cursor:pointer;
+    border:1px solid var(--line); background:var(--card); color:var(--muted); box-shadow:var(--shadow);
+    display:grid; place-items:center;
   }
-  .tab[aria-selected="true"] .hk{color:#05080d; border-color:rgba(0,0,0,.3);}
-  .tab:focus-visible{outline:2px solid var(--c); outline-offset:2px;}
-  .tab.t1{--c:var(--amber);} .tab.t2{--c:var(--green);} .tab.t3{--c:var(--violet);}
+  .theme:hover{color:var(--ink);}
+  .theme svg{width:20px; height:20px;}
+  .theme .moon{display:none;}
+  :root[data-theme="dark"] .theme .sun{display:none;}
+  :root[data-theme="dark"] .theme .moon{display:block;}
 
-  .panel{
-    position:relative; z-index:1; width:min(560px,100%);
-    background:var(--panel); border:1px solid var(--stroke);
-    border-radius:18px; padding:26px 24px 22px;
-    box-shadow:0 40px 120px -40px #000, inset 0 1px 0 rgba(255,255,255,.04);
-    backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
+  /* ── картка ── */
+  .card{
+    width:min(480px,100%); margin:0 auto;
+    background:var(--card); border:1px solid var(--line); border-radius:22px;
+    padding:24px; box-shadow:var(--shadow);
   }
-  .panel[hidden]{display:none;}
-  /* кутові «болти» рамки приладу */
-  .panel::before,.panel::after{content:''; position:absolute; width:14px; height:14px; border:2px solid var(--stroke-2);}
-  .panel::before{top:10px; left:10px; border-right:0; border-bottom:0;}
-  .panel::after{bottom:10px; right:10px; border-left:0; border-top:0;}
+  .card[hidden]{display:none;}
+  .head{display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:20px;}
+  .head h1{margin:0; font-size:1.35rem; font-weight:700; letter-spacing:-.02em;}
+  .head span{color:var(--muted); font-size:.9rem;}
 
-  header{display:flex; align-items:center; gap:14px; margin-bottom:6px;}
-  .emblem{width:46px; height:46px; flex:none; filter:drop-shadow(0 0 10px rgba(255,180,84,.35));}
-  .title h1{
-    margin:0; font-weight:700; font-size:2.05rem; letter-spacing:.24em; line-height:1;
-    text-transform:uppercase; color:var(--amber);
-  }
-  .title p{margin:4px 0 0; color:var(--muted); font-size:.8rem; letter-spacing:.34em; text-transform:uppercase;}
-
-  .rule{height:1px; margin:18px 0; background:linear-gradient(90deg,transparent,var(--stroke-2),transparent);}
-
-  .controls{display:grid; grid-template-columns:1fr auto; gap:14px; align-items:end;}
-  .controls.two{grid-template-columns:1fr 1fr;}
-  label{display:block; color:var(--muted); font-size:.72rem; letter-spacing:.2em; text-transform:uppercase; margin-bottom:8px;}
+  .grid{display:grid; grid-template-columns:1fr 120px; gap:12px;}
+  .grid.two{grid-template-columns:1fr 1fr;}
+  label{display:block; color:var(--muted); font-size:.8rem; font-weight:500; margin:0 0 6px 2px;}
   .field{
-    display:flex; align-items:center; gap:10px;
-    background:#080d13; border:1px solid var(--stroke-2); border-radius:12px; padding:12px 14px;
-    transition:border-color .15s, box-shadow .15s;
+    display:flex; align-items:center; gap:10px; height:58px; padding:0 16px;
+    background:var(--field); border:1px solid var(--line); border-radius:14px;
+    transition:border-color .15s, box-shadow .15s, background .15s;
   }
-  .field:focus-within{border-color:var(--amber); box-shadow:0 0 0 3px rgba(255,180,84,.12);}
-  .field .tag{color:var(--amber); font-family:var(--mono); font-size:1.1rem;}
+  .field:focus-within{border-color:var(--accent); box-shadow:0 0 0 4px var(--accent-soft); background:var(--card);}
+  .field .tag{color:var(--faint); font:600 1rem var(--mono);}
   input{
-    width:100%; min-width:0; border:0; background:transparent; color:var(--ink);
-    font-family:var(--mono); font-size:1.5rem; letter-spacing:.02em; outline:none;
-    font-variant-numeric:tabular-nums;
+    width:100%; min-width:0; border:0; background:transparent; color:var(--ink); outline:none;
+    font:600 1.45rem var(--mono); font-variant-numeric:tabular-nums;
   }
-  input::placeholder{color:var(--faint);}
+  .grid .small input{font-size:1.15rem;}
+  input::placeholder{color:var(--faint); font-weight:500;}
   input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0;}
   input[type=number]{-moz-appearance:textfield;}
-  .offset{width:118px;}
-  .offset .field{padding:12px;}
-  .offset input{font-size:1.15rem;}
 
-  .readouts{display:grid; gap:12px; margin-top:20px;}
-  .tile{
-    position:relative; display:flex; align-items:center; justify-content:space-between; gap:14px;
-    background:#070c12; border:1px solid var(--stroke); border-radius:14px; padding:16px 18px;
-    overflow:hidden;
+  /* ── результати ── */
+  .out{display:grid; gap:10px; margin-top:20px;}
+  .row{
+    display:flex; align-items:center; gap:14px; padding:14px 16px 14px 14px;
+    border:1px solid var(--line); border-radius:16px; background:var(--card);
+    cursor:pointer; user-select:none; transition:border-color .15s, background .15s, transform .08s;
   }
-  .tile::before{content:''; position:absolute; left:0; top:0; bottom:0; width:4px; background:var(--c);}
-  .tile .meta{display:flex; flex-direction:column; gap:3px;}
-  .tile .k{font-family:var(--mono); font-size:1.25rem; color:var(--c); letter-spacing:.06em;}
-  .tile .f{color:var(--faint); font-size:.72rem; letter-spacing:.12em; text-transform:uppercase;}
-  .tile .f.fm,.tile .f.fp{font-family:var(--mono); font-size:1rem; letter-spacing:.04em; color:var(--muted);}
-  .tile .v{
-    font-family:var(--mono); font-size:2.15rem; letter-spacing:.02em; color:var(--ink);
-    font-variant-numeric:tabular-nums; text-shadow:0 0 18px color-mix(in srgb,var(--c) 40%,transparent);
+  .row:hover{border-color:var(--line-2); background:var(--field);}
+  .row:active{transform:scale(.99);}
+  .badge{
+    flex:none; width:40px; height:40px; border-radius:12px; display:grid; place-items:center;
+    font:700 1.05rem var(--mono); color:var(--c); background:color-mix(in srgb,var(--c) 14%,transparent);
   }
-  .tile.copy{cursor:pointer; transition:border-color .15s, background .15s;}
-  .tile.copy:hover{border-color:var(--c);}
-  .tile.copy:active{background:#0b121a;}
-  .tile .v{user-select:all; -webkit-user-select:all;}
+  .row .lbl{display:flex; flex-direction:column; gap:1px; min-width:0;}
+  .row .lbl b{font-weight:600; font-size:.95rem;}
+  .row .lbl small{color:var(--muted); font:500 .85rem var(--mono);}
+  .row .v{
+    margin-left:auto; font:600 1.9rem var(--mono); letter-spacing:-.02em;
+    font-variant-numeric:tabular-nums; user-select:all; -webkit-user-select:all;
+  }
+  .row .cp{flex:none; width:18px; height:18px; color:var(--faint); transition:color .15s;}
+  .row:hover .cp{color:var(--muted);}
+  .row.x{--c:var(--minus);} .row.y{--c:var(--base);} .row.z{--c:var(--plus);} .row.avg{--c:var(--avg);}
+  .row.avg{padding:20px 18px 20px 16px;}
+  .row.avg .v{font-size:2.5rem;}
+  .row.flash{border-color:var(--c); background:color-mix(in srgb,var(--c) 8%,var(--card));}
+
+  .hint{margin:16px 0 0; text-align:center; color:var(--faint); font-size:.8rem;}
+  .hint kbd{font:500 .75rem var(--mono); border:1px solid var(--line-2); border-bottom-width:2px; border-radius:5px; padding:0 5px; color:var(--muted);}
+
   .toast{
-    position:fixed; left:50%; bottom:24px; z-index:20; transform:translate(-50%,20px); opacity:0;
-    background:#0b121a; border:1px solid var(--stroke-2); border-radius:10px; padding:10px 16px;
-    font-family:var(--mono); font-size:1rem; color:var(--ink); pointer-events:none;
+    position:fixed; left:50%; bottom:24px; z-index:20; transform:translate(-50%,16px); opacity:0;
+    background:var(--ink); color:var(--card); border-radius:12px; padding:10px 16px;
+    font:500 .95rem var(--sans); pointer-events:none; box-shadow:var(--shadow);
     transition:opacity .18s, transform .18s;
   }
+  .toast b{font-family:var(--mono);}
   .toast.on{opacity:1; transform:translate(-50%,0);}
-  .tile.x{--c:var(--cyan);} .tile.y{--c:var(--amber);} .tile.z{--c:var(--green);}
-  .tile.y{border-color:rgba(255,180,84,.28);}
-  .tile.avg{--c:var(--violet); border-color:rgba(185,155,255,.30); padding:22px 18px;}
-  .tile.avg .v{font-size:2.8rem;}
 
-  footer{margin-top:18px; color:var(--faint); font-size:.72rem; letter-spacing:.14em; text-transform:uppercase; text-align:center;}
-
-  @media (max-width:520px){
-    .tab{font-size:.9rem; gap:5px; padding:0 6px; letter-spacing:.04em;}
-    .tab .hk,.tab .lbl{display:none;}
+  @media (max-width:440px){
+    .card{padding:18px; border-radius:18px;}
+    .grid,.grid.two{grid-template-columns:1fr 1fr;}
+    .grid:not(.two){grid-template-columns:1fr 96px;}
+    .row .v{font-size:1.6rem;}
+    .row.avg .v{font-size:2rem;}
+    .tab{font-size:.88rem;}
+    .hint .keys{display:none;}
   }
-  @media (max-width:420px){
-    .controls{grid-template-columns:1fr;}
-    .controls.two{grid-template-columns:1fr;}
-    .offset{width:100%;}
-    .title h1{font-size:1.7rem;}
-    .tile .v{font-size:1.8rem;}
-    .tile.avg .v{font-size:2.2rem;}
-  }
+  @media (prefers-reduced-motion:reduce){ *{transition:none!important;} }
 </style>
 </head>
 <body>
-<canvas id="radar" aria-hidden="true"></canvas>
 
-<nav class="tabs" role="tablist" aria-label="Режими">
-  <button class="tab t1" role="tab" id="tab-1" aria-controls="p-1" aria-selected="true"><span class="lbl">Зсув</span> <span class="n">±<span id="tabOff1">450</span></span> <span class="hk">1</span></button>
-  <button class="tab t2" role="tab" id="tab-2" aria-controls="p-2" aria-selected="false" tabindex="-1"><span class="lbl">Зсув</span> <span class="n">±<span id="tabOff2">500</span></span> <span class="hk">2</span></button>
-  <button class="tab t3" role="tab" id="tab-3" aria-controls="p-3" aria-selected="false" tabindex="-1">Середнє <span class="hk">3</span></button>
+<nav class="bar">
+  <div class="seg" role="tablist" aria-label="Режими">
+    <button class="tab" role="tab" id="tab-1" aria-controls="p-1" aria-selected="true"><span class="n">±<span id="tabOff1">450</span></span></button>
+    <button class="tab" role="tab" id="tab-2" aria-controls="p-2" aria-selected="false" tabindex="-1"><span class="n">±<span id="tabOff2">500</span></span></button>
+    <button class="tab" role="tab" id="tab-3" aria-controls="p-3" aria-selected="false" tabindex="-1">Середнє</button>
+  </div>
+  <button class="theme" id="theme" aria-label="Змінити тему" title="Світла / темна тема">
+    <svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+    <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+  </button>
 </nav>
 
+<!-- іконка копіювання (перевикористовується) -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+</svg>
+
 <!-- ── Вкладка 1: ±зсув (450) ── -->
-<main class="panel" id="p-1" role="tabpanel" aria-labelledby="tab-1" data-offset-default="450">
-  <header>
-    <svg class="emblem" viewBox="0 0 48 48" fill="none" aria-hidden="true">
-      <path d="M24 8 L24 40" stroke="#ffb454" stroke-width="2" stroke-linecap="round"/>
-      <path d="M24 15 C14 17 6 22 2 27 C11 26 18 25 24 25 Z" fill="#ffb454" opacity=".9"/>
-      <path d="M24 15 C34 17 42 22 46 27 C37 26 30 25 24 25 Z" fill="#ffb454" opacity=".9"/>
-      <circle cx="24" cy="24" r="21" stroke="rgba(120,170,200,.30)" stroke-width="1.5"/>
-      <circle cx="24" cy="24" r="2.4" fill="#ffb454"/>
-    </svg>
-    <div class="title">
-      <h1>Крила</h1>
-      <p>Балістичний калькулятор</p>
-    </div>
-  </header>
-  <div class="rule"></div>
-  <div class="controls">
+<main class="card" id="p-1" role="tabpanel" aria-labelledby="tab-1">
+  <div class="head"><h1>Крила</h1><span>Зсув ±<span class="offTxt">450</span></span></div>
+  <div class="grid">
     <div>
-      <label for="y1">Y — базове значення</label>
-      <div class="field"><span class="tag">Y</span><input id="y1" class="y" type="number" inputmode="numeric" placeholder="напр. 1500" autocomplete="off" /></div>
+      <label for="y1">Базове значення</label>
+      <div class="field"><span class="tag">Y</span><input id="y1" class="y" type="number" inputmode="numeric" placeholder="1500" autocomplete="off" /></div>
     </div>
-    <div class="offset">
+    <div class="small">
       <label for="off1">Зсув</label>
       <div class="field"><span class="tag">±</span><input id="off1" class="off" type="number" inputmode="numeric" value="450" autocomplete="off" /></div>
     </div>
   </div>
-  <div class="readouts">
-    <div class="tile x"><div class="meta"><span class="k">X</span><span class="f fm">−450</span></div><span class="v vx">—</span></div>
-    <div class="tile y"><div class="meta"><span class="k">Y</span></div><span class="v vy">—</span></div>
-    <div class="tile z"><div class="meta"><span class="k">Z</span><span class="f fp">+450</span></div><span class="v vz">—</span></div>
+  <div class="out">
+    <div class="row x"><span class="badge">X</span><span class="lbl"><small class="fm">−450</small></span><span class="v vx">—</span><svg class="cp"><use href="#i-copy"/></svg></div>
+    <div class="row y"><span class="badge">Y</span><span class="lbl"></span><span class="v vy">—</span><svg class="cp"><use href="#i-copy"/></svg></div>
+    <div class="row z"><span class="badge">Z</span><span class="lbl"><small class="fp">+450</small></span><span class="v vz">—</span><svg class="cp"><use href="#i-copy"/></svg></div>
   </div>
-  <footer>Введи Y — X і Z рахуються автоматично · клік по числу — копіює</footer>
+  <p class="hint">Натисни на число, щоб скопіювати<span class="keys"> · вкладки <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></span></p>
 </main>
 
 <!-- ── Вкладка 2: ±зсув (500) ── -->
-<main class="panel" id="p-2" role="tabpanel" aria-labelledby="tab-2" data-offset-default="500" hidden>
-  <header>
-    <svg class="emblem" viewBox="0 0 48 48" fill="none" aria-hidden="true">
-      <path d="M24 8 L24 40" stroke="#ffb454" stroke-width="2" stroke-linecap="round"/>
-      <path d="M24 15 C14 17 6 22 2 27 C11 26 18 25 24 25 Z" fill="#ffb454" opacity=".9"/>
-      <path d="M24 15 C34 17 42 22 46 27 C37 26 30 25 24 25 Z" fill="#ffb454" opacity=".9"/>
-      <circle cx="24" cy="24" r="21" stroke="rgba(120,170,200,.30)" stroke-width="1.5"/>
-      <circle cx="24" cy="24" r="2.4" fill="#ffb454"/>
-    </svg>
-    <div class="title">
-      <h1>Крила</h1>
-      <p>Балістичний калькулятор</p>
-    </div>
-  </header>
-  <div class="rule"></div>
-  <div class="controls">
+<main class="card" id="p-2" role="tabpanel" aria-labelledby="tab-2" hidden>
+  <div class="head"><h1>Крила</h1><span>Зсув ±<span class="offTxt">500</span></span></div>
+  <div class="grid">
     <div>
-      <label for="y2">Y — базове значення</label>
-      <div class="field"><span class="tag">Y</span><input id="y2" class="y" type="number" inputmode="numeric" placeholder="напр. 1500" autocomplete="off" /></div>
+      <label for="y2">Базове значення</label>
+      <div class="field"><span class="tag">Y</span><input id="y2" class="y" type="number" inputmode="numeric" placeholder="1500" autocomplete="off" /></div>
     </div>
-    <div class="offset">
+    <div class="small">
       <label for="off2">Зсув</label>
       <div class="field"><span class="tag">±</span><input id="off2" class="off" type="number" inputmode="numeric" value="500" autocomplete="off" /></div>
     </div>
   </div>
-  <div class="readouts">
-    <div class="tile x"><div class="meta"><span class="k">X</span><span class="f fm">−450</span></div><span class="v vx">—</span></div>
-    <div class="tile y"><div class="meta"><span class="k">Y</span></div><span class="v vy">—</span></div>
-    <div class="tile z"><div class="meta"><span class="k">Z</span><span class="f fp">+450</span></div><span class="v vz">—</span></div>
+  <div class="out">
+    <div class="row x"><span class="badge">X</span><span class="lbl"><small class="fm">−500</small></span><span class="v vx">—</span><svg class="cp"><use href="#i-copy"/></svg></div>
+    <div class="row y"><span class="badge">Y</span><span class="lbl"></span><span class="v vy">—</span><svg class="cp"><use href="#i-copy"/></svg></div>
+    <div class="row z"><span class="badge">Z</span><span class="lbl"><small class="fp">+500</small></span><span class="v vz">—</span><svg class="cp"><use href="#i-copy"/></svg></div>
   </div>
-  <footer>Введи Y — X і Z рахуються автоматично · клік по числу — копіює</footer>
+  <p class="hint">Натисни на число, щоб скопіювати<span class="keys"> · вкладки <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></span></p>
 </main>
 
 <!-- ── Вкладка 3: середнє ── -->
-<main class="panel" id="p-3" role="tabpanel" aria-labelledby="tab-3" hidden>
-  <header>
-    <svg class="emblem" viewBox="0 0 48 48" fill="none" aria-hidden="true">
-      <path d="M24 8 L24 40" stroke="#ffb454" stroke-width="2" stroke-linecap="round"/>
-      <path d="M24 15 C14 17 6 22 2 27 C11 26 18 25 24 25 Z" fill="#ffb454" opacity=".9"/>
-      <path d="M24 15 C34 17 42 22 46 27 C37 26 30 25 24 25 Z" fill="#ffb454" opacity=".9"/>
-      <circle cx="24" cy="24" r="21" stroke="rgba(120,170,200,.30)" stroke-width="1.5"/>
-      <circle cx="24" cy="24" r="2.4" fill="#ffb454"/>
-    </svg>
-    <div class="title">
-      <h1>Крила</h1>
-      <p>Середнє значення</p>
-    </div>
-  </header>
-  <div class="rule"></div>
-  <div class="controls two">
+<main class="card" id="p-3" role="tabpanel" aria-labelledby="tab-3" hidden>
+  <div class="head"><h1>Крила</h1><span>Середнє значення</span></div>
+  <div class="grid two">
     <div>
       <label for="a">Перше число</label>
-      <div class="field"><span class="tag">А</span><input id="a" type="number" inputmode="numeric" placeholder="напр. 1000" autocomplete="off" /></div>
+      <div class="field"><span class="tag">А</span><input id="a" type="number" inputmode="numeric" placeholder="1000" autocomplete="off" /></div>
     </div>
     <div>
       <label for="b">Друге число</label>
-      <div class="field"><span class="tag">Б</span><input id="b" type="number" inputmode="numeric" placeholder="напр. 1500" autocomplete="off" /></div>
+      <div class="field"><span class="tag">Б</span><input id="b" type="number" inputmode="numeric" placeholder="1500" autocomplete="off" /></div>
     </div>
   </div>
-  <div class="readouts">
-    <div class="tile avg"><div class="meta"><span class="k">(А+Б)÷2</span></div><span class="v" id="vavg">—</span></div>
+  <div class="out">
+    <div class="row avg"><span class="lbl"><b>Результат</b></span><span class="v" id="vavg">—</span><svg class="cp"><use href="#i-copy"/></svg></div>
   </div>
-  <footer>Введи два числа — середнє рахується автоматично · клік по числу — копіює</footer>
+  <p class="hint">Натисни на число, щоб скопіювати<span class="keys"> · вкладки <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></span></p>
 </main>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
@@ -270,6 +241,15 @@
 
   function store(k,v){ try{ if(v===undefined) return localStorage.getItem(k); localStorage.setItem(k,v); }catch(e){ return null; } }
 
+  /* ── тема ── */
+  var root=document.documentElement;
+  if(store('kryla-theme')==='dark') root.setAttribute('data-theme','dark');
+  document.getElementById('theme').addEventListener('click',function(){
+    var dark=root.getAttribute('data-theme')!=='dark';
+    if(dark) root.setAttribute('data-theme','dark'); else root.removeAttribute('data-theme');
+    store('kryla-theme',dark?'dark':'light');
+  });
+
   /* плавна зміна числа в елементі */
   function counter(el){
     var cur=0, raf;
@@ -277,7 +257,7 @@
       set:function(to){
         if(reduce){ cur=to; el.textContent=fmt(to); return; }
         cancelAnimationFrame(raf);
-        var from=cur, t0=performance.now(), dur=380;
+        var from=cur, t0=performance.now(), dur=320;
         function step(now){
           var p=Math.min(1,(now-t0)/dur), e=1-Math.pow(1-p,3);
           cur=from+(to-from)*e; el.textContent=fmt(cur);
@@ -293,14 +273,15 @@
   [1,2].forEach(function(i){
     var p=document.getElementById('p-'+i);
     var yEl=p.querySelector('.y'), offEl=p.querySelector('.off');
-    var tabOff=document.getElementById('tabOff'+i), fm=p.querySelector('.fm'), fp=p.querySelector('.fp');
+    var tabOff=document.getElementById('tabOff'+i), offTxt=p.querySelector('.offTxt');
+    var fm=p.querySelector('.fm'), fp=p.querySelector('.fp');
     var out={x:counter(p.querySelector('.vx')), y:counter(p.querySelector('.vy')), z:counter(p.querySelector('.vz'))};
     var saved=store('kryla-off'+i);
     if(saved!==null && saved!=='') offEl.value=saved;
 
     function calc(){
       var off=parseFloat(offEl.value)||0;
-      tabOff.textContent=fmt(off);
+      tabOff.textContent=offTxt.textContent=fmt(off);
       fm.textContent='−'+fmt(off); fp.textContent='+'+fmt(off);
       var yRaw=yEl.value.trim();
       if(yRaw===''){ out.x.clear(); out.y.clear(); out.z.clear(); return; }
@@ -323,80 +304,50 @@
   }
   aEl.addEventListener('input',calcAvg); bEl.addEventListener('input',calcAvg);
 
-  /* ── клік по плитці — копіювання числа ── */
+  /* ── клік по рядку — копіювання числа ── */
   var toast=document.getElementById('toast'), toastT;
-  function notify(msg){ toast.textContent=msg; toast.classList.add('on'); clearTimeout(toastT); toastT=setTimeout(function(){ toast.classList.remove('on'); },1200); }
-  function copyText(t){
-    if(navigator.clipboard&&window.isSecureContext) return navigator.clipboard.writeText(t).catch(function(){ legacyCopy(t); });
-    legacyCopy(t); return Promise.resolve();
-  }
+  function notify(t){ toast.innerHTML='Скопійовано <b></b>'; toast.lastChild.textContent=t; toast.classList.add('on'); clearTimeout(toastT); toastT=setTimeout(function(){ toast.classList.remove('on'); },1200); }
   function legacyCopy(t){
     var ta=document.createElement('textarea'); ta.value=t; ta.setAttribute('readonly','');
     ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta); ta.select();
     try{ document.execCommand('copy'); }catch(e){} document.body.removeChild(ta);
   }
-  [].forEach.call(document.querySelectorAll('.tile'),function(tile){
-    var v=tile.querySelector('.v'); tile.classList.add('copy'); tile.title='Натисни, щоб скопіювати';
-    tile.addEventListener('click',function(){
-      if(String(window.getSelection())!=='' && !v.contains(window.getSelection().anchorNode)) return;
+  function copyText(t){
+    if(navigator.clipboard&&window.isSecureContext) return navigator.clipboard.writeText(t).catch(function(){ legacyCopy(t); });
+    legacyCopy(t); return Promise.resolve();
+  }
+  [].forEach.call(document.querySelectorAll('.row'),function(row){
+    var v=row.querySelector('.v'); row.title='Натисни, щоб скопіювати';
+    row.addEventListener('click',function(){
       var t=v.textContent.trim(); if(t==='—') return;
-      copyText(t).then(function(){ notify('Скопійовано: '+t); });
+      copyText(t).then(function(){
+        notify(t); row.classList.add('flash'); setTimeout(function(){ row.classList.remove('flash'); },400);
+      });
     });
   });
 
   /* ── перемикання вкладок ── */
   var tabs=[].slice.call(document.querySelectorAll('.tab'));
   var firstInput={1:'y1',2:'y2',3:'a'};
-  function show(i,focus){
+  function show(i){
     tabs.forEach(function(t,k){
       var on=(k+1)===i;
       t.setAttribute('aria-selected',on); t.tabIndex=on?0:-1;
       document.getElementById('p-'+(k+1)).hidden=!on;
     });
     store('kryla-tab',i);
-    if(focus!==false){ var el=document.getElementById(firstInput[i]); el.focus(); el.select&&el.select(); }
+    var el=document.getElementById(firstInput[i]); el.focus(); el.select&&el.select();
   }
   tabs.forEach(function(t,k){ t.addEventListener('click',function(){ show(k+1); }); });
   /* Alt+1/2/3 або 1/2/3 коли курсор не в полі — швидке перемикання */
   document.addEventListener('keydown',function(e){
+    if(e.key==='Enter'&&document.activeElement.tagName==='INPUT'){ document.activeElement.select(); return; }
     var n=parseInt(e.key,10); if(!(n>=1&&n<=3)) return;
     var inField=document.activeElement&&document.activeElement.tagName==='INPUT';
     if(e.altKey||(!inField&&!e.ctrlKey&&!e.metaKey)){ e.preventDefault(); show(n); }
   });
-  /* Enter у будь-якому полі — виділити число, щоб одразу вводити нове */
-  document.addEventListener('keydown',function(e){
-    if(e.key==='Enter'&&document.activeElement.tagName==='INPUT') document.activeElement.select();
-  });
   var startTab=parseInt(store('kryla-tab'),10);
   show(startTab>=1&&startTab<=3?startTab:1);
-
-  /* ── фоновий радар ── */
-  var cv=document.getElementById('radar'), ctx=cv.getContext('2d'), W,H,cx,cy,R;
-  function resize(){
-    W=cv.width=innerWidth*devicePixelRatio; H=cv.height=innerHeight*devicePixelRatio;
-    cv.style.width=innerWidth+'px'; cv.style.height=innerHeight+'px';
-    cx=W/2; cy=H*0.46; R=Math.max(W,H)*0.62;
-  }
-  resize(); addEventListener('resize',function(){ resize(); if(reduce) rings(); });
-  function rings(){
-    ctx.save(); ctx.strokeStyle='rgba(90,140,170,.12)'; ctx.lineWidth=devicePixelRatio;
-    for(var i=1;i<=5;i++){ ctx.beginPath(); ctx.arc(cx,cy,R*i/5,0,Math.PI*2); ctx.stroke(); }
-    ctx.beginPath(); ctx.moveTo(cx-R,cy); ctx.lineTo(cx+R,cy);
-    ctx.moveTo(cx,cy-R); ctx.lineTo(cx,cy+R); ctx.stroke(); ctx.restore();
-  }
-  var ang=0;
-  function frame(){
-    ctx.clearRect(0,0,W,H); rings();
-    ctx.save(); ctx.translate(cx,cy); ctx.rotate(ang);
-    var grad=ctx.createLinearGradient(0,0,R,0);
-    grad.addColorStop(0,'rgba(255,180,84,.20)'); grad.addColorStop(1,'rgba(255,180,84,0)');
-    ctx.fillStyle=grad; ctx.beginPath(); ctx.moveTo(0,0);
-    ctx.arc(0,0,R,-0.42,0); ctx.closePath(); ctx.fill();
-    ctx.strokeStyle='rgba(255,180,84,.5)'; ctx.lineWidth=1.5*devicePixelRatio;
-    ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(R,0); ctx.stroke(); ctx.restore();
-    ang+=0.006; requestAnimationFrame(frame);
-  }
-  if(!reduce) frame(); else { rings(); }
 })();
 </script>
 </body>
