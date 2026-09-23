@@ -114,10 +114,22 @@
   .tile .meta{display:flex; flex-direction:column; gap:3px;}
   .tile .k{font-family:var(--mono); font-size:1.25rem; color:var(--c); letter-spacing:.06em;}
   .tile .f{color:var(--faint); font-size:.72rem; letter-spacing:.12em; text-transform:uppercase;}
+  .tile .f.fm,.tile .f.fp{font-family:var(--mono); font-size:1rem; letter-spacing:.04em; color:var(--muted);}
   .tile .v{
     font-family:var(--mono); font-size:2.15rem; letter-spacing:.02em; color:var(--ink);
     font-variant-numeric:tabular-nums; text-shadow:0 0 18px color-mix(in srgb,var(--c) 40%,transparent);
   }
+  .tile.copy{cursor:pointer; transition:border-color .15s, background .15s;}
+  .tile.copy:hover{border-color:var(--c);}
+  .tile.copy:active{background:#0b121a;}
+  .tile .v{user-select:all; -webkit-user-select:all;}
+  .toast{
+    position:fixed; left:50%; bottom:24px; z-index:20; transform:translate(-50%,20px); opacity:0;
+    background:#0b121a; border:1px solid var(--stroke-2); border-radius:10px; padding:10px 16px;
+    font-family:var(--mono); font-size:1rem; color:var(--ink); pointer-events:none;
+    transition:opacity .18s, transform .18s;
+  }
+  .toast.on{opacity:1; transform:translate(-50%,0);}
   .tile.x{--c:var(--cyan);} .tile.y{--c:var(--amber);} .tile.z{--c:var(--green);}
   .tile.y{border-color:rgba(255,180,84,.28);}
   .tile.avg{--c:var(--violet); border-color:rgba(185,155,255,.30); padding:22px 18px;}
@@ -177,11 +189,11 @@
     </div>
   </div>
   <div class="readouts">
-    <div class="tile x"><div class="meta"><span class="k">X</span><span class="f">Y − зсув</span></div><span class="v vx">—</span></div>
-    <div class="tile y"><div class="meta"><span class="k">Y</span><span class="f">базове</span></div><span class="v vy">—</span></div>
-    <div class="tile z"><div class="meta"><span class="k">Z</span><span class="f">Y + зсув</span></div><span class="v vz">—</span></div>
+    <div class="tile x"><div class="meta"><span class="k">X</span><span class="f fm">−450</span></div><span class="v vx">—</span></div>
+    <div class="tile y"><div class="meta"><span class="k">Y</span></div><span class="v vy">—</span></div>
+    <div class="tile z"><div class="meta"><span class="k">Z</span><span class="f fp">+450</span></div><span class="v vz">—</span></div>
   </div>
-  <footer>Введи Y — X і Z рахуються автоматично</footer>
+  <footer>Введи Y — X і Z рахуються автоматично · клік по числу — копіює</footer>
 </main>
 
 <!-- ── Вкладка 2: ±зсув (500) ── -->
@@ -211,11 +223,11 @@
     </div>
   </div>
   <div class="readouts">
-    <div class="tile x"><div class="meta"><span class="k">X</span><span class="f">Y − зсув</span></div><span class="v vx">—</span></div>
-    <div class="tile y"><div class="meta"><span class="k">Y</span><span class="f">базове</span></div><span class="v vy">—</span></div>
-    <div class="tile z"><div class="meta"><span class="k">Z</span><span class="f">Y + зсув</span></div><span class="v vz">—</span></div>
+    <div class="tile x"><div class="meta"><span class="k">X</span><span class="f fm">−450</span></div><span class="v vx">—</span></div>
+    <div class="tile y"><div class="meta"><span class="k">Y</span></div><span class="v vy">—</span></div>
+    <div class="tile z"><div class="meta"><span class="k">Z</span><span class="f fp">+450</span></div><span class="v vz">—</span></div>
   </div>
-  <footer>Введи Y — X і Z рахуються автоматично</footer>
+  <footer>Введи Y — X і Z рахуються автоматично · клік по числу — копіює</footer>
 </main>
 
 <!-- ── Вкладка 3: середнє ── -->
@@ -237,24 +249,27 @@
   <div class="controls two">
     <div>
       <label for="a">Перше число</label>
-      <div class="field"><span class="tag">A</span><input id="a" type="number" inputmode="numeric" placeholder="напр. 1000" autocomplete="off" /></div>
+      <div class="field"><span class="tag">А</span><input id="a" type="number" inputmode="numeric" placeholder="напр. 1000" autocomplete="off" /></div>
     </div>
     <div>
       <label for="b">Друге число</label>
-      <div class="field"><span class="tag">B</span><input id="b" type="number" inputmode="numeric" placeholder="напр. 1500" autocomplete="off" /></div>
+      <div class="field"><span class="tag">Б</span><input id="b" type="number" inputmode="numeric" placeholder="напр. 1500" autocomplete="off" /></div>
     </div>
   </div>
   <div class="readouts">
-    <div class="tile avg"><div class="meta"><span class="k">СЕРЕДНЄ</span><span class="f">(A + B) ÷ 2, округлено</span></div><span class="v" id="vavg">—</span></div>
+    <div class="tile avg"><div class="meta"><span class="k">(А+Б)÷2</span></div><span class="v" id="vavg">—</span></div>
     <div class="tile half"><div class="meta"><span class="k">±</span><span class="f">половина різниці</span></div><span class="v" id="vhalf">—</span></div>
   </div>
-  <footer>Введи два числа — середнє рахується автоматично</footer>
+  <footer>Введи два числа — середнє рахується автоматично · клік по числу — копіює</footer>
 </main>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script>
 (function(){
   var reduce=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  var nf=new Intl.NumberFormat('uk-UA');
+  /* числа без пробілів між розрядами — щоб зручно копіювати */
+  function fmt(n){ return String(Math.round(n)); }
 
   function store(k,v){ try{ if(v===undefined) return localStorage.getItem(k); localStorage.setItem(k,v); }catch(e){ return null; } }
 
@@ -263,12 +278,12 @@
     var cur=0, raf;
     return {
       set:function(to){
-        if(reduce){ cur=to; el.textContent=nf.format(Math.round(to)); return; }
+        if(reduce){ cur=to; el.textContent=fmt(to); return; }
         cancelAnimationFrame(raf);
         var from=cur, t0=performance.now(), dur=380;
         function step(now){
           var p=Math.min(1,(now-t0)/dur), e=1-Math.pow(1-p,3);
-          cur=from+(to-from)*e; el.textContent=nf.format(Math.round(cur));
+          cur=from+(to-from)*e; el.textContent=fmt(cur);
           if(p<1) raf=requestAnimationFrame(step);
         }
         raf=requestAnimationFrame(step);
@@ -281,14 +296,15 @@
   [1,2].forEach(function(i){
     var p=document.getElementById('p-'+i);
     var yEl=p.querySelector('.y'), offEl=p.querySelector('.off');
-    var tabOff=document.getElementById('tabOff'+i);
+    var tabOff=document.getElementById('tabOff'+i), fm=p.querySelector('.fm'), fp=p.querySelector('.fp');
     var out={x:counter(p.querySelector('.vx')), y:counter(p.querySelector('.vy')), z:counter(p.querySelector('.vz'))};
     var saved=store('kryla-off'+i);
     if(saved!==null && saved!=='') offEl.value=saved;
 
     function calc(){
       var off=parseFloat(offEl.value)||0;
-      tabOff.textContent=nf.format(off);
+      tabOff.textContent=fmt(off);
+      fm.textContent='−'+fmt(off); fp.textContent='+'+fmt(off);
       var yRaw=yEl.value.trim();
       if(yRaw===''){ out.x.clear(); out.y.clear(); out.z.clear(); return; }
       var y=parseFloat(yRaw)||0;
@@ -309,6 +325,27 @@
     avg.set(Math.round((a+b)/2)); half.set(Math.abs(b-a)/2);
   }
   aEl.addEventListener('input',calcAvg); bEl.addEventListener('input',calcAvg);
+
+  /* ── клік по плитці — копіювання числа ── */
+  var toast=document.getElementById('toast'), toastT;
+  function notify(msg){ toast.textContent=msg; toast.classList.add('on'); clearTimeout(toastT); toastT=setTimeout(function(){ toast.classList.remove('on'); },1200); }
+  function copyText(t){
+    if(navigator.clipboard&&window.isSecureContext) return navigator.clipboard.writeText(t).catch(function(){ legacyCopy(t); });
+    legacyCopy(t); return Promise.resolve();
+  }
+  function legacyCopy(t){
+    var ta=document.createElement('textarea'); ta.value=t; ta.setAttribute('readonly','');
+    ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta); ta.select();
+    try{ document.execCommand('copy'); }catch(e){} document.body.removeChild(ta);
+  }
+  [].forEach.call(document.querySelectorAll('.tile'),function(tile){
+    var v=tile.querySelector('.v'); tile.classList.add('copy'); tile.title='Натисни, щоб скопіювати';
+    tile.addEventListener('click',function(){
+      if(String(window.getSelection())!=='' && !v.contains(window.getSelection().anchorNode)) return;
+      var t=v.textContent.trim(); if(t==='—') return;
+      copyText(t).then(function(){ notify('Скопійовано: '+t); });
+    });
+  });
 
   /* ── перемикання вкладок ── */
   var tabs=[].slice.call(document.querySelectorAll('.tab'));
