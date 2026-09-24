@@ -458,7 +458,7 @@ class LabelDesigner(tk.Tk):
         self._tool_button(group, "+ QR", self._add_qr, "Додати QR-код")
         self._tool_button(group, "+ Штрихкод", self._add_barcode, "Додати штрихкод Code 128")
         self._tool_button(
-            group, "📋 Вставити", self._paste_element,
+            group, "Вставити", self._paste_element,
             "Ctrl+V — вставити текст або картинку з буфера обміну\n"
             "(скриншот, фото, текст із Word/браузера, файл зображення)",
         )
@@ -823,7 +823,7 @@ class LabelDesigner(tk.Tk):
         )
         self.print_button = ttk.Button(
             job,
-            text="🖨  ДРУКУВАТИ",
+            text="ДРУКУВАТИ",
             command=self._print_layout,
             state="disabled",
             style="Accent.TButton",
