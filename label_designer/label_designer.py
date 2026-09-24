@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Простий редактор та друк наліпок 50x30 мм для Windows/Xprinter."""
+"""Редактор та друк наліпок (типово 50x30 мм, є власні пресети) для Windows/Xprinter."""
 
 import base64
 import copy
@@ -10,6 +10,7 @@ import hashlib
 import io
 import ipaddress
 import json
+import math
 import os
 import socket
 import subprocess
@@ -20,6 +21,7 @@ import tkinter as tk
 import uuid
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import font as tkfont
 
 if os.name == "nt":
     import winreg
@@ -30,7 +32,7 @@ import qrcode
 from barcode.writer import ImageWriter
 
 
-APP_TITLE = "Редактор наліпок 50×30 — Xprinter"
+APP_TITLE = "Редактор наліпок {size} — Xprinter"
 LABEL_WIDTH_MM = 50.0
 LABEL_HEIGHT_MM = 30.0
 BASE_PX_PER_MM = 14
@@ -45,6 +47,42 @@ DRAG_THRESHOLD_PX = 5
 STATUS_REFRESH_MS = 4000
 SAFE_MARGIN_MM = 1.5
 MAX_HISTORY = 100
+IMAGE_FILETYPES = "*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff"
+# Межі розміру наліпки: XP-420B друкує смугу шириною до 108 мм.
+MIN_LABEL_MM = 5.0
+MAX_LABEL_WIDTH_MM = 108.0
+MAX_LABEL_HEIGHT_MM = 300.0
+BUILTIN_SIZE_PRESETS = (
+    (30.0, 20.0),
+    (40.0, 25.0),
+    (40.0, 30.0),
+    (50.0, 30.0),
+    (58.0, 40.0),
+    (60.0, 40.0),
+    (70.0, 50.0),
+    (100.0, 50.0),
+    (100.0, 100.0),
+    (100.0, 150.0),
+)
+ZOOM_LEVELS = ("50%", "75%", "100%", "125%", "150%", "200%", "300%")
+UI_FONT = "Segoe UI"
+COLORS = {
+    "panel": "#ffffff",
+    "soft": "#f4f6f9",
+    "border": "#d8dee6",
+    "text": "#1f2933",
+    "muted": "#6b7785",
+    "accent": "#1f6feb",
+    "accent_hover": "#1a5fd0",
+    "accent_pressed": "#154fae",
+    "accent_soft": "#e8f0fe",
+    "workspace": "#d3d8df",
+    "shadow": "#aeb6c1",
+    "status": "#eef1f5",
+    "ok": "#087f23",
+    "error": "#c00000",
+    "checking": "#9a6700",
+}
 LOCAL_DRIVER_SOURCE = (
     r"C:\Windows\System32\DriverStore\FileRepository"
     r"\xprinter.inf_amd64_a2184ce9ef55d7a6"
@@ -59,12 +97,68 @@ def px_to_mm(value):
     return round(float(value) / PX_PER_MM, 2)
 
 
+def size_text(width, height):
+    return f"{float(width):g} × {float(height):g} мм"
+
+
+class ToolTip:
+    """Невелика підказка, що з'являється при наведенні на кнопку."""
+
+    def __init__(self, widget, text, delay=500):
+        self.widget = widget
+        self.text = text
+        self.delay = delay
+        self.tip = None
+        self.job = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        self.job = self.widget.after(self.delay, self._show)
+
+    def _cancel(self):
+        if self.job:
+            try:
+                self.widget.after_cancel(self.job)
+            except tk.TclError:
+                pass
+            self.job = None
+
+    def _show(self):
+        self.job = None
+        if self.tip or not self.widget.winfo_exists():
+            return
+        x = self.widget.winfo_rootx() + 6
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        self.tip = tk.Toplevel(self.widget)
+        self.tip.wm_overrideredirect(True)
+        self.tip.wm_geometry(f"+{x}+{y}")
+        tk.Label(
+            self.tip,
+            text=self.text,
+            bg="#1f2933",
+            fg="#ffffff",
+            font=(UI_FONT, 9),
+            padx=8,
+            pady=4,
+            justify="left",
+        ).pack()
+
+    def _hide(self, _event=None):
+        self._cancel()
+        if self.tip:
+            self.tip.destroy()
+            self.tip = None
+
+
 class LabelDesigner(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title(APP_TITLE)
-        self.geometry("1200x820")
-        self.minsize(1080, 740)
+        self.title(APP_TITLE.format(size=size_text(LABEL_WIDTH_MM, LABEL_HEIGHT_MM)))
+        self.geometry("1280x840")
+        self.minsize(1120, 740)
 
         self.elements = []
         self.selected_id = None
@@ -74,6 +168,11 @@ class LabelDesigner(tk.Tk):
         self.drag_origin = None
         self.drag_started = False
         self.resize_state = None
+        self.rotate_state = None
+        self.image_size_cache = {}
+        self.presets_dialog = None
+        self.active_preset_display = None
+        self.clipboard_signature = None
         self.inline_editor = None
         self.inline_element_id = None
         self.inline_original_text = None
@@ -101,8 +200,15 @@ class LabelDesigner(tk.Tk):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.autosave_path = self.data_dir / "autosave.json"
         self.recovery_payload = self._read_autosave_payload()
+        self.presets_path = self.data_dir / "size_presets.json"
+        self.custom_presets = []
+        last_size = self._load_size_presets()
 
         self._build_ui()
+        try:
+            self._set_label_size(*self._validate_label_size(*last_size))
+        except (TypeError, ValueError):
+            self._set_label_size(LABEL_WIDTH_MM, LABEL_HEIGHT_MM)
         self._refresh_printers()
         self._new_layout(confirm=False)
         self.autosave_suspended = False
@@ -110,78 +216,311 @@ class LabelDesigner(tk.Tk):
         self.connection_after_id = self.after(500, self._schedule_connection_check)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+    def _setup_style(self):
+        self.configure(bg=COLORS["panel"])
+        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
+            try:
+                tkfont.nametofont(name).configure(family=UI_FONT, size=10)
+            except tk.TclError:
+                pass
+        style = ttk.Style(self)
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+        panel = COLORS["panel"]
+        border = COLORS["border"]
+        accent = COLORS["accent"]
+        style.configure(
+            ".",
+            background=panel,
+            foreground=COLORS["text"],
+            font=(UI_FONT, 10),
+            bordercolor=border,
+            lightcolor=panel,
+            darkcolor=panel,
+            focuscolor=accent,
+            troughcolor=COLORS["soft"],
+        )
+        style.configure("TFrame", background=panel)
+        style.configure("TLabel", background=panel)
+        style.configure("Title.TLabel", font=(UI_FONT, 11, "bold"))
+        style.configure("Caption.TLabel", foreground=COLORS["muted"], font=(UI_FONT, 8))
+        style.configure("Hint.TLabel", foreground=COLORS["muted"], font=(UI_FONT, 9))
+        style.configure("Ok.TLabel", foreground="#4b6b4b", font=(UI_FONT, 9))
+        style.configure("Status.TFrame", background=COLORS["status"])
+        style.configure("Status.TLabel", background=COLORS["status"], foreground=COLORS["text"], font=(UI_FONT, 9))
+        style.configure(
+            "TLabelframe", background=panel, bordercolor=border, relief="solid", borderwidth=1
+        )
+        style.configure(
+            "TLabelframe.Label", background=panel, foreground=COLORS["muted"], font=(UI_FONT, 9, "bold")
+        )
+        # width=0: кнопки за шириною тексту, а не з мінімальною шириною теми clam.
+        for name, pad in (("TButton", (10, 5)), ("Tool.TButton", (7, 4))):
+            style.configure(
+                name,
+                padding=pad,
+                width=0,
+                background=COLORS["soft"],
+                bordercolor=border,
+                lightcolor=COLORS["soft"],
+                darkcolor=COLORS["soft"],
+                focusthickness=0,
+            )
+            style.map(
+                name,
+                background=[("pressed", "#d4e3fc"), ("active", COLORS["accent_soft"])],
+                lightcolor=[("pressed", "#d4e3fc"), ("active", COLORS["accent_soft"])],
+                darkcolor=[("pressed", "#d4e3fc"), ("active", COLORS["accent_soft"])],
+                bordercolor=[("active", "#9ec0f5")],
+            )
+        style.configure(
+            "Accent.TButton",
+            padding=(12, 9),
+            background=accent,
+            foreground="#ffffff",
+            bordercolor=accent,
+            lightcolor=accent,
+            darkcolor=accent,
+            font=(UI_FONT, 11, "bold"),
+        )
+        style.map(
+            "Accent.TButton",
+            background=[("disabled", "#a9c3ea"), ("pressed", COLORS["accent_pressed"]),
+                        ("active", COLORS["accent_hover"])],
+            lightcolor=[("disabled", "#a9c3ea"), ("pressed", COLORS["accent_pressed"]),
+                        ("active", COLORS["accent_hover"])],
+            darkcolor=[("disabled", "#a9c3ea"), ("pressed", COLORS["accent_pressed"]),
+                       ("active", COLORS["accent_hover"])],
+            bordercolor=[("disabled", "#a9c3ea")],
+            foreground=[("disabled", "#f3f7fd")],
+        )
+        for name in ("TEntry", "TCombobox", "TSpinbox"):
+            style.configure(
+                name, fieldbackground="#ffffff", bordercolor=border, lightcolor=border,
+                darkcolor=border, padding=4, arrowsize=13,
+            )
+            style.map(name, bordercolor=[("focus", accent)], lightcolor=[("focus", accent)])
+        style.map("TCombobox", fieldbackground=[("readonly", "#ffffff")])
+        style.configure("TNotebook", background=panel, borderwidth=0, tabmargins=(0, 0, 0, 0))
+        style.configure(
+            "TNotebook.Tab", padding=(16, 7), background=COLORS["soft"], bordercolor=border,
+            lightcolor=COLORS["soft"], font=(UI_FONT, 10),
+        )
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", panel)],
+            lightcolor=[("selected", panel)],
+            foreground=[("selected", accent)],
+        )
+        style.configure("TCheckbutton", background=panel)
+        style.configure("TRadiobutton", background=panel)
+        style.configure("Horizontal.TScale", background=panel, troughcolor=COLORS["soft"])
+
+    def _toolbar_group(self, parent, caption, separator=True, side="left"):
+        outer = ttk.Frame(parent)
+        outer.pack(side=side, fill="y")
+        buttons = ttk.Frame(outer)
+        buttons.pack(side="top")
+        ttk.Label(outer, text=caption, style="Caption.TLabel").pack(side="top", pady=(3, 0))
+        if separator:
+            ttk.Separator(parent, orient="vertical").pack(side=side, fill="y", padx=8)
+        return buttons
+
+    @staticmethod
+    def _tool_button(parent, text, command, tip=None, style="Tool.TButton", side="left"):
+        button = ttk.Button(parent, text=text, command=command, style=style)
+        button.pack(side=side, padx=1)
+        if tip:
+            ToolTip(button, tip)
+        return button
+
+    def _build_menu(self):
+        menubar = tk.Menu(self)
+        file_menu = tk.Menu(menubar, tearoff=False)
+        file_menu.add_command(label="Новий макет", accelerator="Ctrl+N", command=self._new_layout)
+        file_menu.add_command(label="Відкрити…", accelerator="Ctrl+O", command=self._load_layout)
+        file_menu.add_command(label="Зберегти", accelerator="Ctrl+S", command=self._save_layout)
+        file_menu.add_command(label="Зберегти як…", accelerator="Ctrl+Shift+S", command=self._save_layout_as)
+        file_menu.add_separator()
+        file_menu.add_command(label="Вихід", command=self._on_close)
+        menubar.add_cascade(label="Файл", menu=file_menu)
+
+        edit_menu = tk.Menu(menubar, tearoff=False)
+        edit_menu.add_command(label="Скасувати", accelerator="Ctrl+Z", command=self._undo)
+        edit_menu.add_command(label="Повторити", accelerator="Ctrl+Y", command=self._redo)
+        edit_menu.add_separator()
+        edit_menu.add_command(label="Копіювати елемент", accelerator="Ctrl+C", command=self._copy_selected)
+        edit_menu.add_command(
+            label="Вставити (текст, картинку або елемент)", accelerator="Ctrl+V",
+            command=self._paste_element,
+        )
+        edit_menu.add_command(label="Дублювати", accelerator="Ctrl+D", command=self._duplicate_selected)
+        edit_menu.add_command(label="Видалити", accelerator="Del", command=self._delete_selected)
+        edit_menu.add_separator()
+        edit_menu.add_command(label="Заблокувати / розблокувати елемент", command=self._toggle_selected_lock)
+        edit_menu.add_command(label="Заблокувати / розблокувати макет", command=self._toggle_layout_lock)
+        menubar.add_cascade(label="Правка", menu=edit_menu)
+
+        insert_menu = tk.Menu(menubar, tearoff=False)
+        insert_menu.add_command(label="Текст", command=self._add_text)
+        insert_menu.add_command(label="Зображення з файлу…", command=self._add_image)
+        insert_menu.add_command(label="QR-код…", command=self._add_qr)
+        insert_menu.add_command(label="Штрихкод Code 128…", command=self._add_barcode)
+        insert_menu.add_separator()
+        insert_menu.add_command(
+            label="З буфера обміну", accelerator="Ctrl+V", command=self._paste_element
+        )
+        menubar.add_cascade(label="Вставка", menu=insert_menu)
+
+        image_menu = tk.Menu(menubar, tearoff=False)
+        image_menu.add_command(
+            label="Повернути за годинниковою ⟳ 90°", accelerator="Ctrl+R",
+            command=lambda: self._rotate_selected(90),
+        )
+        image_menu.add_command(
+            label="Повернути проти годинникової ⟲ 90°", accelerator="Ctrl+Shift+R",
+            command=lambda: self._rotate_selected(-90),
+        )
+        image_menu.add_command(label="Повернути на 180°", command=lambda: self._rotate_selected(180))
+        image_menu.add_separator()
+        image_menu.add_command(label="Віддзеркалити по ширині ⇆", command=lambda: self._flip_selected("h"))
+        image_menu.add_command(label="Віддзеркалити по висоті ⇅", command=lambda: self._flip_selected("v"))
+        image_menu.add_separator()
+        image_menu.add_command(label="Скинути поворот і віддзеркалення", command=self._reset_image_transform)
+        menubar.add_cascade(label="Зображення", menu=image_menu)
+
+        view_menu = tk.Menu(menubar, tearoff=False)
+        view_menu.add_checkbutton(label="Сітка", variable=self.show_grid_var, command=self._render_all)
+        view_menu.add_checkbutton(label="Прив’язка", variable=self.snap_var)
+        view_menu.add_checkbutton(
+            label="Безпечні поля", variable=self.safe_margin_var, command=self._render_all
+        )
+        view_menu.add_separator()
+        for level in ZOOM_LEVELS:
+            view_menu.add_radiobutton(
+                label=f"Масштаб {level}", value=level, variable=self.zoom_var, command=self._set_zoom
+            )
+        menubar.add_cascade(label="Вигляд", menu=view_menu)
+
+        label_menu = tk.Menu(menubar, tearoff=False)
+        label_menu.add_command(label="Пресети розміру…", command=self._open_size_presets_dialog)
+        menubar.add_cascade(label="Наліпка", menu=label_menu)
+        self.config(menu=menubar)
+
     def _build_ui(self):
+        self._setup_style()
         self.show_grid_var = tk.BooleanVar(value=True)
         self.snap_var = tk.BooleanVar(value=True)
         self.safe_margin_var = tk.BooleanVar(value=True)
         self.zoom_var = tk.StringVar(value="100%")
+        self.size_preset_var = tk.StringVar()
+        self.size_status_var = tk.StringVar()
+        self.status_var = tk.StringVar(value="Готово")
+        self._build_menu()
 
-        toolbar = ttk.Frame(self, padding=8)
+        # Рядок стану пакуємо першим, щоб він завжди лишався видимим унизу вікна.
+        statusbar = ttk.Frame(self, style="Status.TFrame", padding=(10, 4))
+        statusbar.pack(side="bottom", fill="x")
+        self.status_conn_label = tk.Label(
+            statusbar, text="● Перевірка принтера…", fg=COLORS["checking"],
+            bg=COLORS["status"], font=(UI_FONT, 9),
+        )
+        self.status_conn_label.pack(side="right", padx=(14, 0))
+        ttk.Label(statusbar, textvariable=self.size_status_var, style="Status.TLabel").pack(
+            side="right", padx=(14, 0)
+        )
+        ttk.Label(statusbar, textvariable=self.status_var, style="Status.TLabel").pack(
+            side="left", fill="x", expand=True
+        )
+
+        # ---- Верхня панель інструментів -------------------------------------------------
+        toolbar = ttk.Frame(self, padding=(10, 8, 10, 6))
         toolbar.pack(fill="x")
-        ttk.Button(toolbar, text="Новий", command=self._new_layout).pack(side="left", padx=2)
-        ttk.Button(toolbar, text="Відкрити", command=self._load_layout).pack(side="left", padx=2)
-        ttk.Button(toolbar, text="Зберегти", command=self._save_layout).pack(side="left", padx=2)
-        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=8)
-        ttk.Button(toolbar, text="+ Текст", command=self._add_text).pack(side="left", padx=2)
-        ttk.Button(toolbar, text="+ Зображення", command=self._add_image).pack(side="left", padx=2)
-        ttk.Button(toolbar, text="Видалити", command=self._delete_selected).pack(side="left", padx=2)
-        ttk.Button(toolbar, text="На передній план", command=self._bring_front).pack(side="left", padx=2)
-        ttk.Button(toolbar, text="🔒 Елемент", command=self._toggle_selected_lock).pack(
-            side="left", padx=2
+        size_group = self._toolbar_group(toolbar, "Розмір наліпки", separator=False, side="right")
+        self.size_combo = ttk.Combobox(
+            size_group, textvariable=self.size_preset_var, state="readonly", width=17
         )
-        ttk.Button(toolbar, text="🔒 Макет", command=self._toggle_layout_lock).pack(
-            side="left", padx=2
+        self.size_combo.pack(side="left", padx=(0, 4), ipady=1)
+        self.size_combo.bind("<<ComboboxSelected>>", self._size_preset_selected)
+        self._tool_button(
+            size_group, "⚙", self._open_size_presets_dialog,
+            "Додати, змінити або видалити власні розміри наліпок",
         )
-        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=8)
-        ttk.Button(
-            toolbar, text="Центр ↔", command=lambda: self._center_selected(horizontal=True)
-        ).pack(side="left", padx=2)
-        ttk.Button(
-            toolbar, text="Центр ↕", command=lambda: self._center_selected(vertical=True)
-        ).pack(side="left", padx=2)
 
-        advanced = ttk.Frame(self, padding=(8, 0, 8, 7))
-        advanced.pack(fill="x")
-        ttk.Button(advanced, text="↶ Скасувати", command=self._undo).pack(side="left", padx=2)
-        ttk.Button(advanced, text="↷ Повторити", command=self._redo).pack(side="left", padx=2)
-        ttk.Button(advanced, text="Дублювати", command=self._duplicate_selected).pack(side="left", padx=2)
-        ttk.Button(advanced, text="+ QR", command=self._add_qr).pack(side="left", padx=2)
-        ttk.Button(advanced, text="+ Штрихкод", command=self._add_barcode).pack(side="left", padx=2)
-        ttk.Separator(advanced, orient="vertical").pack(side="left", fill="y", padx=8)
-        ttk.Checkbutton(
-            advanced, text="Сітка", variable=self.show_grid_var, command=self._render_all
-        ).pack(side="left", padx=3)
-        ttk.Checkbutton(advanced, text="Прив’язка", variable=self.snap_var).pack(side="left", padx=3)
-        ttk.Checkbutton(
-            advanced, text="Безпечні поля", variable=self.safe_margin_var, command=self._render_all
-        ).pack(side="left", padx=3)
-        ttk.Label(advanced, text="Масштаб:").pack(side="left", padx=(12, 3))
+        group = self._toolbar_group(toolbar, "Файл")
+        self._tool_button(group, "Новий", self._new_layout, "Новий макет (Ctrl+N)")
+        self._tool_button(group, "Відкрити", self._load_layout, "Відкрити макет (Ctrl+O)")
+        self._tool_button(group, "Зберегти", self._save_layout, "Зберегти макет (Ctrl+S)")
+
+        group = self._toolbar_group(toolbar, "Додати")
+        self._tool_button(group, "+ Текст", self._add_text, "Додати текстовий блок")
+        self._tool_button(group, "+ Зображення", self._add_image, "Додати картинку з файлу")
+        self._tool_button(group, "+ QR", self._add_qr, "Додати QR-код")
+        self._tool_button(group, "+ Штрихкод", self._add_barcode, "Додати штрихкод Code 128")
+        self._tool_button(
+            group, "📋 Вставити", self._paste_element,
+            "Ctrl+V — вставити текст або картинку з буфера обміну\n"
+            "(скриншот, фото, текст із Word/браузера, файл зображення)",
+        )
+
+        group = self._toolbar_group(toolbar, "Правка")
+        self._tool_button(group, "↶", self._undo, "Скасувати (Ctrl+Z)")
+        self._tool_button(group, "↷", self._redo, "Повторити (Ctrl+Y)")
+        self._tool_button(group, "Дублювати", self._duplicate_selected, "Дублювати елемент (Ctrl+D)")
+        self._tool_button(group, "Видалити", self._delete_selected, "Видалити елемент (Delete)")
+
+        tk.Frame(self, bg=COLORS["border"], height=1).pack(fill="x")
+
+        body = ttk.Frame(self)
+        body.pack(fill="both", expand=True)
+
+        # ---- Права панель ----------------------------------------------------------------
+        side = ttk.Frame(body, width=392, padding=(12, 10, 12, 10))
+        side.pack(side="right", fill="y")
+        side.pack_propagate(False)
+        tk.Frame(body, bg=COLORS["border"], width=1).pack(side="right", fill="y")
+
+        # ---- Робоча область --------------------------------------------------------------
+        workspace = ttk.Frame(body)
+        workspace.pack(side="left", fill="both", expand=True)
+
+        viewbar = ttk.Frame(workspace, padding=(10, 6))
+        viewbar.pack(fill="x")
+        ttk.Label(viewbar, text="Масштаб").pack(side="left", padx=(0, 4))
         zoom_combo = ttk.Combobox(
-            advanced,
-            textvariable=self.zoom_var,
-            values=("75%", "100%", "125%", "150%", "200%"),
-            state="readonly",
-            width=6,
+            viewbar, textvariable=self.zoom_var, values=ZOOM_LEVELS, state="readonly", width=6
         )
         zoom_combo.pack(side="left")
         zoom_combo.bind("<<ComboboxSelected>>", self._set_zoom)
+        ToolTip(zoom_combo, "Масштаб перегляду (Ctrl + коліщатко миші)")
+        ttk.Separator(viewbar, orient="vertical").pack(side="left", fill="y", padx=10)
+        ttk.Checkbutton(
+            viewbar, text="Сітка", variable=self.show_grid_var, command=self._render_all
+        ).pack(side="left", padx=4)
+        ttk.Checkbutton(viewbar, text="Прив’язка", variable=self.snap_var).pack(side="left", padx=4)
+        ttk.Checkbutton(
+            viewbar, text="Безпечні поля", variable=self.safe_margin_var, command=self._render_all
+        ).pack(side="left", padx=4)
+        self._tool_button(
+            viewbar, "🔒 Макет", self._toggle_layout_lock,
+            "Заблокувати / розблокувати всі елементи макета", side="right",
+        )
+        tk.Frame(workspace, bg=COLORS["border"], height=1).pack(fill="x")
 
-        body = ttk.Frame(self, padding=(8, 0, 8, 8))
-        body.pack(fill="both", expand=True)
-
-        workspace = ttk.Frame(body)
-        workspace.pack(side="left", fill="both", expand=True)
         ttk.Label(
             workspace,
-            text=("Наліпка 50×30 мм — перетягуйте елементи мишкою; "
-                  "тягніть сині маркери для зміни розміру, Shift зберігає пропорції"),
-        ).pack(anchor="w", pady=(0, 6))
+            text=("Тягніть мишкою  •  сині маркери — розмір (Shift — пропорції)  •  "
+                  "↻ — поворот  •  Ctrl+V — вставити текст/картинку"),
+            style="Hint.TLabel",
+            padding=(10, 5),
+        ).pack(side="bottom", fill="x")
+        tk.Frame(workspace, bg=COLORS["border"], height=1).pack(side="bottom", fill="x")
 
-        canvas_holder = tk.Frame(workspace, bg="#d6d6d6", padx=24, pady=24)
+        canvas_holder = tk.Frame(workspace, bg=COLORS["workspace"])
         canvas_holder.pack(fill="both", expand=True)
         canvas_holder.rowconfigure(0, weight=1)
         canvas_holder.columnconfigure(0, weight=1)
-        self.canvas_view = tk.Canvas(canvas_holder, bg="#d6d6d6", highlightthickness=0)
+        self.canvas_view = tk.Canvas(canvas_holder, bg=COLORS["workspace"], highlightthickness=0)
         canvas_x_scroll = ttk.Scrollbar(canvas_holder, orient="horizontal", command=self.canvas_view.xview)
         canvas_y_scroll = ttk.Scrollbar(canvas_holder, orient="vertical", command=self.canvas_view.yview)
         self.canvas_view.configure(xscrollcommand=canvas_x_scroll.set, yscrollcommand=canvas_y_scroll.set)
@@ -190,47 +529,67 @@ class LabelDesigner(tk.Tk):
         canvas_x_scroll.grid(row=1, column=0, sticky="ew")
         self.canvas = tk.Canvas(
             self.canvas_view,
-            width=CANVAS_WIDTH,
-            height=CANVAS_HEIGHT,
+            width=round(LABEL_WIDTH_MM * PX_PER_MM),
+            height=round(LABEL_HEIGHT_MM * PX_PER_MM),
             bg="white",
             highlightthickness=1,
-            highlightbackground="#555555",
+            highlightbackground="#8a94a3",
         )
-        self.canvas_window = self.canvas_view.create_window(24, 24, window=self.canvas, anchor="nw")
-        self.canvas_view.configure(scrollregion=(0, 0, CANVAS_WIDTH + 48, CANVAS_HEIGHT + 48))
+        self.canvas_window = self.canvas_view.create_window(32, 32, window=self.canvas, anchor="nw")
+        self.canvas_view.bind("<Configure>", self._center_canvas)
         self.canvas.bind("<Button-1>", self._canvas_click)
         self.canvas.bind("<Double-Button-1>", self._canvas_double_click)
         self.canvas.bind("<B1-Motion>", self._canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self._canvas_release)
-
-        side = ttk.Frame(body, width=370, padding=(14, 0, 0, 0))
-        side.pack(side="right", fill="y")
-        side.pack_propagate(False)
+        self.canvas.bind("<Motion>", self._canvas_motion)
+        for widget in (self.canvas_view, self.canvas):
+            widget.bind("<MouseWheel>", self._mouse_wheel)
+            widget.bind("<Control-MouseWheel>", self._mouse_wheel_zoom)
+            widget.bind("<Shift-MouseWheel>", self._mouse_wheel_horizontal)
+            widget.bind("<Button-4>", self._mouse_wheel)
+            widget.bind("<Button-5>", self._mouse_wheel)
 
         notebook = ttk.Notebook(side)
         notebook.pack(fill="both", expand=True)
-        edit_tab = ttk.Frame(notebook, padding=8)
-        print_tab = ttk.Frame(notebook, padding=8)
-        notebook.add(edit_tab, text="Редагування")
+        props_tab = ttk.Frame(notebook, padding=(4, 10, 4, 4))
+        layers_tab = ttk.Frame(notebook, padding=(4, 10, 4, 4))
+        print_tab = ttk.Frame(notebook, padding=(4, 10, 4, 4))
+        notebook.add(props_tab, text="Властивості")
+        notebook.add(layers_tab, text="Шари")
         notebook.add(print_tab, text="Друк")
 
-        props = ttk.LabelFrame(edit_tab, text="Властивості елемента", padding=10)
-        props.pack(fill="x")
-
+        # ---- Вкладка «Властивості» ---------------------------------------------------------
+        props_tab.columnconfigure(0, weight=1)
         self.type_var = tk.StringVar(value="Нічого не вибрано")
-        ttk.Label(props, textvariable=self.type_var, font=("Segoe UI", 10, "bold")).grid(
-            row=0, column=0, columnspan=2, sticky="w", pady=(0, 8)
+        ttk.Label(props_tab, textvariable=self.type_var, style="Title.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
         )
+        self.empty_hint = ttk.Label(
+            props_tab,
+            text=("Виберіть елемент на полотні\nабо додайте новий кнопками «Додати».\n\n"
+                  "Порада: скопіюйте текст чи картинку в будь-якій програмі\n"
+                  "і натисніть тут Ctrl+V."),
+            style="Hint.TLabel",
+            justify="left",
+        )
+        self.empty_hint.grid(row=1, column=0, sticky="nw", pady=(6, 0))
+        self.element_panel = ttk.Frame(props_tab)
+        self.element_panel.grid(row=2, column=0, sticky="nsew")
+        self.element_panel.columnconfigure(0, weight=1)
 
-        ttk.Label(props, text="X, мм").grid(row=1, column=0, sticky="w", pady=3)
+        position = ttk.LabelFrame(self.element_panel, text="Положення, мм", padding=8)
+        position.grid(row=0, column=0, sticky="ew")
         self.x_var = tk.StringVar()
-        ttk.Entry(props, textvariable=self.x_var, width=16).grid(row=1, column=1, sticky="ew")
-        ttk.Label(props, text="Y, мм").grid(row=2, column=0, sticky="w", pady=3)
         self.y_var = tk.StringVar()
-        ttk.Entry(props, textvariable=self.y_var, width=16).grid(row=2, column=1, sticky="ew")
+        ttk.Label(position, text="X").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        ttk.Entry(position, textvariable=self.x_var, width=9).grid(row=0, column=1, sticky="ew")
+        ttk.Label(position, text="Y").grid(row=0, column=2, sticky="w", padx=(14, 6))
+        ttk.Entry(position, textvariable=self.y_var, width=9).grid(row=0, column=3, sticky="ew")
+        position.columnconfigure(1, weight=1)
+        position.columnconfigure(3, weight=1)
 
-        self.text_frame = ttk.Frame(props)
-        self.text_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.text_frame = ttk.LabelFrame(self.element_panel, text="Текст", padding=8)
+        self.text_frame.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         ttk.Label(self.text_frame, text="Текст").grid(row=0, column=0, sticky="w", pady=3)
         self.text_var = tk.StringVar()
         ttk.Entry(self.text_frame, textvariable=self.text_var).grid(row=0, column=1, sticky="ew")
@@ -242,61 +601,147 @@ class LabelDesigner(tk.Tk):
             values=("Tahoma", "Arial", "Segoe UI", "Calibri", "Times New Roman"),
             state="normal",
         ).grid(row=1, column=1, sticky="ew")
-        ttk.Label(self.text_frame, text="Кегль, pt").grid(row=2, column=0, sticky="w", pady=3)
+        ttk.Label(self.text_frame, text="Кегль, pt").grid(row=2, column=0, sticky="w", pady=3, padx=(0, 8))
         self.size_var = tk.StringVar(value="12")
-        ttk.Entry(self.text_frame, textvariable=self.size_var).grid(row=2, column=1, sticky="ew")
+        ttk.Spinbox(
+            self.text_frame, from_=4, to=200, increment=1, textvariable=self.size_var
+        ).grid(row=2, column=1, sticky="ew")
         self.bold_var = tk.BooleanVar()
         ttk.Checkbutton(self.text_frame, text="Жирний", variable=self.bold_var).grid(
             row=3, column=1, sticky="w", pady=3
         )
         self.text_frame.columnconfigure(1, weight=1)
 
-        self.image_frame = ttk.Frame(props)
-        self.image_frame.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        ttk.Label(self.image_frame, text="Ширина, мм").grid(row=0, column=0, sticky="w", pady=3)
+        self.image_frame = ttk.Frame(self.element_panel)
+        self.image_frame.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        self.image_frame.columnconfigure(0, weight=1)
+        dims = ttk.LabelFrame(self.image_frame, text="Розмір рамки, мм", padding=8)
+        dims.grid(row=0, column=0, sticky="ew")
         self.width_var = tk.StringVar()
-        ttk.Entry(self.image_frame, textvariable=self.width_var).grid(row=0, column=1, sticky="ew")
-        ttk.Label(self.image_frame, text="Висота, мм").grid(row=1, column=0, sticky="w", pady=3)
         self.height_var = tk.StringVar()
-        ttk.Entry(self.image_frame, textvariable=self.height_var).grid(row=1, column=1, sticky="ew")
+        ttk.Label(dims, text="Ш").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        ttk.Entry(dims, textvariable=self.width_var, width=9).grid(row=0, column=1, sticky="ew")
+        ttk.Label(dims, text="В").grid(row=0, column=2, sticky="w", padx=(14, 6))
+        ttk.Entry(dims, textvariable=self.height_var, width=9).grid(row=0, column=3, sticky="ew")
+        dims.columnconfigure(1, weight=1)
+        dims.columnconfigure(3, weight=1)
         self.image_path_var = tk.StringVar()
-        ttk.Label(self.image_frame, textvariable=self.image_path_var, wraplength=270).grid(
-            row=2, column=0, columnspan=2, sticky="w", pady=(5, 0)
+        ttk.Label(dims, textvariable=self.image_path_var, wraplength=320, style="Hint.TLabel").grid(
+            row=1, column=0, columnspan=4, sticky="w", pady=(6, 0)
         )
         ttk.Button(
-            self.image_frame,
+            dims,
             text="Замінити зображення…",
             command=self._replace_image,
-        ).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        self.image_frame.columnconfigure(1, weight=1)
+            style="Tool.TButton",
+        ).grid(row=2, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+
+        rotate = ttk.LabelFrame(self.image_frame, text="Поворот і віддзеркалення", padding=8)
+        rotate.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        rotate.columnconfigure(1, weight=1)
+        turn_row = ttk.Frame(rotate)
+        turn_row.grid(row=0, column=0, columnspan=3, sticky="ew")
+        for column, (text, command, tip) in enumerate((
+            ("⟲ 90°", lambda: self._rotate_selected(-90), "Проти годинникової стрілки (Ctrl+Shift+R)"),
+            ("⟳ 90°", lambda: self._rotate_selected(90), "За годинниковою стрілкою (Ctrl+R)"),
+            ("↻ 180°", lambda: self._rotate_selected(180), "Перевернути догори дном"),
+        )):
+            button = ttk.Button(turn_row, text=text, command=command, style="Tool.TButton")
+            button.grid(row=0, column=column, sticky="ew", padx=1)
+            ToolTip(button, tip)
+            turn_row.columnconfigure(column, weight=1)
+        flip_row = ttk.Frame(rotate)
+        flip_row.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+        for column, (text, axis, tip) in enumerate((
+            ("⇆ По ширині", "h", "Віддзеркалити зліва направо"),
+            ("⇅ По висоті", "v", "Віддзеркалити згори донизу"),
+        )):
+            button = ttk.Button(
+                flip_row, text=text, command=lambda a=axis: self._flip_selected(a), style="Tool.TButton"
+            )
+            button.grid(row=0, column=column, sticky="ew", padx=1)
+            ToolTip(button, tip)
+            flip_row.columnconfigure(column, weight=1)
+        ttk.Label(rotate, text="Кут, °").grid(row=2, column=0, sticky="w", pady=(8, 0), padx=(0, 8))
+        self.rotation_var = tk.StringVar(value="0")
+        ttk.Spinbox(
+            rotate, from_=0, to=359, increment=1, wrap=True, textvariable=self.rotation_var, width=7
+        ).grid(row=2, column=1, sticky="ew", pady=(8, 0))
+        ttk.Button(
+            rotate, text="Скинути", command=self._reset_image_transform, style="Tool.TButton"
+        ).grid(row=2, column=2, sticky="e", pady=(8, 0), padx=(6, 0))
+        self.rotation_scale_var = tk.DoubleVar(value=0.0)
+        self.rotation_slider_active = False
+        self.rotation_scale = ttk.Scale(
+            rotate, from_=0, to=359, variable=self.rotation_scale_var, command=self._rotation_scale_moved
+        )
+        self.rotation_scale.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        self.rotation_scale.bind("<ButtonPress-1>", self._rotation_scale_pressed, add="+")
+        self.rotation_scale.bind("<ButtonRelease-1>", self._rotation_scale_released, add="+")
+        self.flip_state_var = tk.StringVar()
+        ttk.Label(rotate, textvariable=self.flip_state_var, style="Hint.TLabel").grid(
+            row=4, column=0, columnspan=3, sticky="w", pady=(4, 0)
+        )
+        ttk.Label(
+            rotate,
+            text="Або тягніть круглий маркер ↻ над картинкою. Shift — крок 15°.",
+            style="Hint.TLabel",
+            wraplength=320,
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(2, 0))
+
+        actions = ttk.LabelFrame(self.element_panel, text="Дії з елементом", padding=8)
+        actions.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        for index, (text, command, tip) in enumerate((
+            ("Центр ↔", lambda: self._center_selected(horizontal=True), "Центрувати по горизонталі"),
+            ("Центр ↕", lambda: self._center_selected(vertical=True), "Центрувати по вертикалі"),
+            ("На передній план", self._bring_front, "Перемістити над іншими елементами"),
+            ("🔒 Блокувати", self._toggle_selected_lock, "Заблокувати / розблокувати від зсуву"),
+        )):
+            button = ttk.Button(actions, text=text, command=command, style="Tool.TButton")
+            button.grid(row=index // 2, column=index % 2, sticky="ew", padx=1, pady=1)
+            ToolTip(button, tip)
+        actions.columnconfigure(0, weight=1)
+        actions.columnconfigure(1, weight=1)
 
         ttk.Label(
-            props,
-            text="Зміни застосовуються автоматично",
-            foreground="#4b6b4b",
-        ).grid(
-            row=5, column=0, columnspan=2, sticky="w", pady=(10, 0)
-        )
-        props.columnconfigure(1, weight=1)
+            self.element_panel, text="✓ Зміни застосовуються автоматично", style="Ok.TLabel"
+        ).grid(row=4, column=0, sticky="w", pady=(8, 0))
 
-        layers = ttk.LabelFrame(edit_tab, text="Шари", padding=8)
-        layers.pack(fill="both", expand=True, pady=(10, 0))
-        self.layers_list = tk.Listbox(layers, height=8, exportselection=False)
+        # ---- Вкладка «Шари» --------------------------------------------------------------
+        ttk.Label(layers_tab, text="Верхній рядок — верхній шар", style="Hint.TLabel").pack(
+            anchor="w", pady=(0, 6)
+        )
+        self.layers_list = tk.Listbox(
+            layers_tab,
+            height=8,
+            exportselection=False,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=1,
+            highlightbackground=COLORS["border"],
+            highlightcolor=COLORS["accent"],
+            selectbackground=COLORS["accent"],
+            selectforeground="#ffffff",
+            activestyle="none",
+            font=(UI_FONT, 10),
+        )
         self.layers_list.pack(fill="both", expand=True)
         self.layers_list.bind("<<ListboxSelect>>", self._layer_selected)
-        layer_buttons = ttk.Frame(layers)
+        layer_buttons = ttk.Frame(layers_tab)
         layer_buttons.pack(fill="x", pady=(6, 0))
-        ttk.Button(layer_buttons, text="Вище", command=lambda: self._move_layer(1)).pack(
-            side="left", fill="x", expand=True
-        )
-        ttk.Button(layer_buttons, text="Нижче", command=lambda: self._move_layer(-1)).pack(
-            side="left", fill="x", expand=True, padx=4
-        )
-        ttk.Button(layer_buttons, text="Сховати/показати", command=self._toggle_visibility).pack(
-            side="left", fill="x", expand=True
-        )
+        ttk.Button(
+            layer_buttons, text="▲ Вище", command=lambda: self._move_layer(1), style="Tool.TButton"
+        ).pack(side="left", fill="x", expand=True)
+        ttk.Button(
+            layer_buttons, text="▼ Нижче", command=lambda: self._move_layer(-1), style="Tool.TButton"
+        ).pack(side="left", fill="x", expand=True, padx=4)
+        ttk.Button(
+            layer_buttons, text="👁 Сховати/показати", command=self._toggle_visibility,
+            style="Tool.TButton",
+        ).pack(side="left", fill="x", expand=True)
 
-        printing = ttk.LabelFrame(print_tab, text="Друк", padding=10)
+        # ---- Вкладка «Друк» --------------------------------------------------------------
+        printing = ttk.LabelFrame(print_tab, text="Підключення принтера", padding=10)
         printing.pack(fill="x")
 
         ttk.Label(printing, text="Підключення").grid(row=0, column=0, sticky="w", pady=3)
@@ -333,60 +778,70 @@ class LabelDesigner(tk.Tk):
         self.printer_combo.bind("<<ComboboxSelected>>", lambda _event: self._schedule_connection_check())
 
         setup_buttons = ttk.Frame(printing)
-        setup_buttons.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(6, 4))
+        setup_buttons.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 4))
         ttk.Button(
-            setup_buttons, text="Встановити драйвер", command=self._install_driver
+            setup_buttons, text="Встановити драйвер", command=self._install_driver, style="Tool.TButton"
         ).pack(side="left", fill="x", expand=True)
         ttk.Button(
-            setup_buttons, text="Налаштувати мережу", command=self._configure_network_printer
+            setup_buttons, text="Налаштувати мережу", command=self._configure_network_printer,
+            style="Tool.TButton",
         ).pack(side="left", fill="x", expand=True, padx=(5, 0))
 
         refresh_buttons = ttk.Frame(printing)
         refresh_buttons.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 4))
         ttk.Button(
-            refresh_buttons, text="Оновити черги", command=self._refresh_printers
+            refresh_buttons, text="⟳ Оновити черги", command=self._refresh_printers, style="Tool.TButton"
         ).pack(side="left", fill="x", expand=True)
         ttk.Button(
-            refresh_buttons, text="Перевірити зараз", command=self._schedule_connection_check
+            refresh_buttons, text="Перевірити зараз", command=self._schedule_connection_check,
+            style="Tool.TButton",
         ).pack(side="left", fill="x", expand=True, padx=(5, 0))
 
         self.connection_status_label = tk.Label(
             printing,
             text="● Перевірка підключення…",
-            fg="#9a6700",
-            bg=self.cget("background"),
+            fg=COLORS["checking"],
+            bg=COLORS["panel"],
             anchor="w",
             justify="left",
-            wraplength=310,
+            wraplength=320,
+            font=(UI_FONT, 10),
         )
-        self.connection_status_label.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(3, 9))
-
-        ttk.Separator(printing).grid(row=7, column=0, columnspan=2, sticky="ew", pady=(0, 8))
-        ttk.Label(printing, text="Кількість копій").grid(row=8, column=0, sticky="w")
-        self.copies_var = tk.IntVar(value=1)
-        ttk.Spinbox(printing, from_=1, to=99, textvariable=self.copies_var, width=8).grid(
-            row=8, column=1, sticky="e"
-        )
-        self.print_button = ttk.Button(
-            printing,
-            text="ДРУКУВАТИ",
-            command=self._print_layout,
-            state="disabled",
-        )
-        self.print_button.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(12, 0), ipady=5)
-        ttk.Button(
-            printing,
-            text="СЕРІЙНИЙ ДРУК CSV",
-            command=self._batch_print_csv,
-        ).grid(row=10, column=0, columnspan=2, sticky="ew", pady=(7, 0), ipady=3)
-        ttk.Label(
-            printing,
-            text="У тексті, QR або штрихкоді використовуйте поля {serial}, {name} тощо",
-            wraplength=310,
-            foreground="#555555",
-        ).grid(row=11, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.connection_status_label.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         printing.columnconfigure(0, weight=1)
         printing.columnconfigure(1, weight=1)
+
+        job = ttk.LabelFrame(print_tab, text="Друк", padding=10)
+        job.pack(fill="x", pady=(10, 0))
+        ttk.Label(job, textvariable=self.size_status_var, style="Hint.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 6)
+        )
+        ttk.Label(job, text="Кількість копій").grid(row=1, column=0, sticky="w")
+        self.copies_var = tk.IntVar(value=1)
+        ttk.Spinbox(job, from_=1, to=99, textvariable=self.copies_var, width=8).grid(
+            row=1, column=1, sticky="e"
+        )
+        self.print_button = ttk.Button(
+            job,
+            text="🖨  ДРУКУВАТИ",
+            command=self._print_layout,
+            state="disabled",
+            style="Accent.TButton",
+        )
+        self.print_button.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        ttk.Button(
+            job,
+            text="СЕРІЙНИЙ ДРУК CSV",
+            command=self._batch_print_csv,
+        ).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(7, 0), ipady=2)
+        ttk.Label(
+            job,
+            text="У тексті, QR або штрихкоді використовуйте поля {serial}, {name} тощо",
+            wraplength=320,
+            style="Hint.TLabel",
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        job.columnconfigure(0, weight=1)
+        job.columnconfigure(1, weight=1)
 
         for variable in (
             self.x_var,
@@ -397,12 +852,10 @@ class LabelDesigner(tk.Tk):
             self.bold_var,
             self.width_var,
             self.height_var,
+            self.rotation_var,
         ):
             variable.trace_add("write", self._schedule_live_apply)
         self.network_ip_entry.configure(state="disabled")
-
-        self.status_var = tk.StringVar(value="Готово")
-        ttk.Label(side, textvariable=self.status_var, wraplength=300).pack(fill="x", pady=(12, 0))
         self._show_property_frame(None)
 
         self.bind("<Control-z>", self._undo)
@@ -411,6 +864,12 @@ class LabelDesigner(tk.Tk):
         self.bind("<Control-v>", self._paste_element)
         self.bind("<Control-d>", self._duplicate_selected)
         self.bind("<Delete>", self._delete_shortcut)
+        self.bind("<Control-n>", lambda _event: self._new_layout() or "break")
+        self.bind("<Control-o>", lambda _event: self._load_layout() or "break")
+        self.bind("<Control-s>", lambda _event: self._save_layout() or "break")
+        self.bind("<Control-S>", lambda _event: self._save_layout_as() or "break")
+        self.bind("<Control-r>", lambda event: self._rotate_selected(90, event))
+        self.bind("<Control-R>", lambda event: self._rotate_selected(-90, event))
         for key in ("<Left>", "<Right>", "<Up>", "<Down>"):
             self.bind(key, self._nudge_selected)
 
@@ -419,6 +878,8 @@ class LabelDesigner(tk.Tk):
             "elements": copy.deepcopy(self.elements),
             "layout_locked": bool(self.layout_locked),
             "selected_id": self.selected_id,
+            "label_width_mm": LABEL_WIDTH_MM,
+            "label_height_mm": LABEL_HEIGHT_MM,
         }
 
     @staticmethod
@@ -440,6 +901,12 @@ class LabelDesigner(tk.Tk):
         try:
             self._finish_inline_edit(commit=False)
             self.elements = copy.deepcopy(snapshot.get("elements", []))
+            size = (
+                float(snapshot.get("label_width_mm", LABEL_WIDTH_MM)),
+                float(snapshot.get("label_height_mm", LABEL_HEIGHT_MM)),
+            )
+            if size != (LABEL_WIDTH_MM, LABEL_HEIGHT_MM):
+                self._set_label_size(*size)
             self.layout_locked = bool(snapshot.get("layout_locked", False))
             candidate = snapshot.get("selected_id")
             self.selected_id = candidate if any(e.get("id") == candidate for e in self.elements) else None
@@ -533,14 +1000,162 @@ class LabelDesigner(tk.Tk):
         element = self._element()
         if element:
             self.clipboard_element = copy.deepcopy(element)
+            # Кладемо «підпис» у системний буфер: так Ctrl+V знає, що вставляти
+            # саме скопійований елемент, а не текст, скопійований деінде пізніше.
+            if element.get("type") == "text":
+                signature = str(element.get("text", ""))
+            else:
+                signature = f"Елемент наліпки: {self._layer_name(element)[2:].strip()}"
+            try:
+                self.clipboard_clear()
+                self.clipboard_append(signature)
+                self.clipboard_signature = signature
+            except tk.TclError:
+                self.clipboard_signature = None
             self.status_var.set("Елемент скопійовано")
         return "break" if event else None
 
     def _paste_element(self, event=None):
-        if self._event_in_text_input(event):
+        """Ctrl+V: вставити текст або картинку з буфера обміну чи скопійований елемент."""
+        if self._event_in_text_input(event) or self.inline_editor:
             return
+        kind, value = self._read_system_clipboard()
+        if kind == "files":
+            self._paste_image_files(value)
+        elif kind == "text" and self.clipboard_element and value == self.clipboard_signature:
+            self._paste_internal_element()
+        elif kind == "text":
+            self._paste_text(value)
+        elif kind == "image":
+            self._paste_clipboard_image(value)
+        elif self.clipboard_element:
+            self._paste_internal_element()
+        else:
+            self.status_var.set("Буфер обміну порожній: скопіюйте текст або картинку й натисніть Ctrl+V")
+        return "break" if event else None
+
+    def _read_system_clipboard(self):
+        grabbed = None
+        try:
+            from PIL import ImageGrab
+            grabbed = ImageGrab.grabclipboard()
+        except Exception:
+            grabbed = None
+        if isinstance(grabbed, list):
+            files = [str(path) for path in grabbed if self._is_image_file(path)]
+            if files:
+                return "files", files
+        try:
+            text = self.clipboard_get()
+        except tk.TclError:
+            text = ""
+        if text and text.strip():
+            candidates = [
+                line.strip().strip('"').removeprefix("file://")
+                for line in text.strip().splitlines()
+                if line.strip()
+            ]
+            if candidates and all(self._is_image_file(path) for path in candidates):
+                return "files", candidates
+            return "text", text
+        if isinstance(grabbed, Image.Image):
+            return "image", grabbed
+        return None, None
+
+    @staticmethod
+    def _is_image_file(path):
+        try:
+            candidate = Path(str(path))
+            return candidate.is_file() and candidate.suffix.lower() in IMAGE_FILETYPES.replace("*", "").split()
+        except (OSError, ValueError):
+            return False
+
+    def _pointer_position_mm(self):
+        """Позиція курсора на наліпці (мм), якщо курсор зараз над нею."""
+        try:
+            x = self.winfo_pointerx() - self.canvas.winfo_rootx()
+            y = self.winfo_pointery() - self.canvas.winfo_rooty()
+        except tk.TclError:
+            return None
+        if 0 <= x <= self.canvas.winfo_width() and 0 <= y <= self.canvas.winfo_height():
+            return px_to_mm(x), px_to_mm(y)
+        return None
+
+    def _paste_text(self, text):
+        lines = [
+            " ".join(line.split())
+            for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        ]
+        lines = [line[:300] for line in lines if line][:12]
+        if not lines:
+            return
+        self._record_history()
+        start = self._pointer_position_mm()
+        x, y = start if start else (SAFE_MARGIN_MM + 0.5, SAFE_MARGIN_MM + 0.5)
+        max_width = LABEL_WIDTH_MM - 2 * SAFE_MARGIN_MM
+        added = []
+        for line in lines:
+            element = {
+                "id": uuid.uuid4().hex,
+                "type": "text",
+                "x": round(x, 2),
+                "y": round(y, 2),
+                "text": line,
+                "font": "Tahoma",
+                "size": 12.0,
+                "bold": False,
+                "locked": False,
+                "visible": True,
+            }
+            self.elements.append(element)
+            self._render_all()
+            # Довгий рядок автоматично зменшуємо, щоб він умістився в ширину наліпки.
+            width, height = self._element_size_mm(element)
+            while width > max_width and element["size"] > 5:
+                element["size"] = round(max(5.0, element["size"] * max_width / width - 0.25), 2)
+                self._render_all()
+                width, height = self._element_size_mm(element)
+            if element["x"] + width > LABEL_WIDTH_MM - SAFE_MARGIN_MM:
+                element["x"] = round(max(0.0, LABEL_WIDTH_MM - SAFE_MARGIN_MM - width), 2)
+            added.append(element)
+            y += max(height, 1.0)
+        self.selected_id = added[0]["id"]
+        self._render_all()
+        self._load_properties()
+        self.status_var.set(
+            "Текст вставлено з буфера обміну" if len(added) == 1
+            else f"Вставлено рядків тексту: {len(added)}"
+        )
+
+    def _paste_clipboard_image(self, image):
+        folder = self.data_dir / "pasted"
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / f"clipboard_{uuid.uuid4().hex}.png"
+        try:
+            if image.mode not in ("RGB", "RGBA", "L", "LA", "1"):
+                image = image.convert("RGBA")
+            image.save(target, "PNG")
+        except Exception as exc:
+            messagebox.showerror("Вставлення", f"Не вдалося вставити картинку:\n{exc}")
+            return
+        if self._add_image_file(target, self._pointer_position_mm()):
+            self.status_var.set("Картинку вставлено з буфера обміну")
+
+    def _paste_image_files(self, paths):
+        position = self._pointer_position_mm()
+        added = 0
+        for index, path in enumerate(paths[:10]):
+            offset = None
+            if position:
+                offset = (position[0] + index, position[1] + index)
+            if self._add_image_file(path, offset, offset_index=index):
+                added += 1
+        if added:
+            self.status_var.set(f"Вставлено зображень: {added}")
+
+    def _paste_internal_element(self):
         if not self.clipboard_element:
-            return "break" if event else None
+            return
         self._record_history()
         element = copy.deepcopy(self.clipboard_element)
         element["id"] = uuid.uuid4().hex
@@ -552,7 +1167,6 @@ class LabelDesigner(tk.Tk):
         self._render_all()
         self._load_properties()
         self.status_var.set("Елемент вставлено")
-        return "break" if event else None
 
     def _duplicate_selected(self, event=None):
         if self._event_in_text_input(event):
@@ -561,9 +1175,9 @@ class LabelDesigner(tk.Tk):
         if not element:
             return "break" if event else None
         self.clipboard_element = copy.deepcopy(element)
-        result = self._paste_element()
+        self._paste_internal_element()
         self.status_var.set("Елемент продубльовано")
-        return "break" if event else result
+        return "break" if event else None
 
     def _delete_shortcut(self, event=None):
         if self._event_in_text_input(event) or self.inline_editor:
@@ -595,20 +1209,73 @@ class LabelDesigner(tk.Tk):
         except ValueError:
             factor = 1.0
         PX_PER_MM = BASE_PX_PER_MM * factor
+        self._update_canvas_geometry()
+        self._render_all()
+        self.status_var.set(f"Масштаб перегляду: {round(factor * 100)}%")
+
+    def _update_canvas_geometry(self):
         self.canvas.configure(
             width=round(LABEL_WIDTH_MM * PX_PER_MM),
             height=round(LABEL_HEIGHT_MM * PX_PER_MM),
+        )
+        self._center_canvas()
+
+    def _center_canvas(self, _event=None):
+        """Розмістити наліпку по центру робочої області з легкою тінню та підписом розміру."""
+        view_width = max(1, self.canvas_view.winfo_width())
+        view_height = max(1, self.canvas_view.winfo_height())
+        label_width = round(LABEL_WIDTH_MM * PX_PER_MM) + 2
+        label_height = round(LABEL_HEIGHT_MM * PX_PER_MM) + 2
+        pad = 32
+        x = max(pad, (view_width - label_width) / 2)
+        y = max(pad, (view_height - label_height - 24) / 2)
+        self.canvas_view.coords(self.canvas_window, x, y)
+        self.canvas_view.delete("decor")
+        self.canvas_view.create_rectangle(
+            x + 3, y + 4, x + label_width + 4, y + label_height + 5,
+            fill=COLORS["shadow"], outline="", tags="decor",
+        )
+        self.canvas_view.create_text(
+            x + label_width / 2, y + label_height + 18,
+            text=size_text(LABEL_WIDTH_MM, LABEL_HEIGHT_MM),
+            fill="#4a5563", font=(UI_FONT, 9), tags="decor",
         )
         self.canvas_view.configure(
             scrollregion=(
                 0,
                 0,
-                round(LABEL_WIDTH_MM * PX_PER_MM) + 48,
-                round(LABEL_HEIGHT_MM * PX_PER_MM) + 48,
+                max(view_width, x + label_width + pad),
+                max(view_height, y + label_height + pad + 24),
             )
         )
-        self._render_all()
-        self.status_var.set(f"Масштаб перегляду: {round(factor * 100)}%")
+
+    def _mouse_wheel(self, event):
+        if getattr(event, "num", None) == 4:
+            step = -1
+        elif getattr(event, "num", None) == 5:
+            step = 1
+        else:
+            step = -1 if event.delta > 0 else 1
+        if event.state & 0x0004:
+            return self._zoom_step(-step)
+        self.canvas_view.yview_scroll(step, "units")
+        return "break"
+
+    def _mouse_wheel_horizontal(self, event):
+        self.canvas_view.xview_scroll(-1 if event.delta > 0 else 1, "units")
+        return "break"
+
+    def _mouse_wheel_zoom(self, event):
+        return self._zoom_step(1 if event.delta > 0 else -1)
+
+    def _zoom_step(self, direction):
+        current = self.zoom_var.get()
+        index = ZOOM_LEVELS.index(current) if current in ZOOM_LEVELS else ZOOM_LEVELS.index("100%")
+        target = max(0, min(len(ZOOM_LEVELS) - 1, index + direction))
+        if target != index:
+            self.zoom_var.set(ZOOM_LEVELS[target])
+            self._set_zoom()
+        return "break"
 
     def _generated_path(self, prefix):
         folder = self.data_dir / "generated"
@@ -691,7 +1358,16 @@ class LabelDesigner(tk.Tk):
             name = f"Code128: {element.get('code_value', '')}"
         else:
             name = Path(element.get("path", "Зображення")).name
-        return f"{prefix} {name[:34]}{lock}"
+        transform = ""
+        if element.get("type") == "image":
+            angle = self._normalize_angle(element.get("rotation", 0))
+            if angle:
+                transform += f" ↻{angle:g}°"
+            if element.get("flip_h"):
+                transform += " ⇆"
+            if element.get("flip_v"):
+                transform += " ⇅"
+        return f"{prefix} {name[:34]}{transform}{lock}"
 
     def _refresh_layers(self):
         if not hasattr(self, "layers_list"):
@@ -755,7 +1431,7 @@ class LabelDesigner(tk.Tk):
         self.layout_locked = False
         self.current_file = None
         self._render_all()
-        self.status_var.set("Створено новий макет 50×30 мм")
+        self.status_var.set(f"Створено новий макет {size_text(LABEL_WIDTH_MM, LABEL_HEIGHT_MM)}")
 
     def _add_text(self):
         self._record_history()
@@ -779,25 +1455,31 @@ class LabelDesigner(tk.Tk):
     def _add_image(self):
         path = filedialog.askopenfilename(
             title="Виберіть зображення",
-            filetypes=[("Зображення", "*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff"), ("Усі файли", "*.*")],
+            filetypes=[("Зображення", IMAGE_FILETYPES), ("Усі файли", "*.*")],
         )
         if not path:
             return
+        self._add_image_file(path)
+
+    def _add_image_file(self, path, position=None, offset_index=0):
         try:
             with Image.open(path) as image:
                 ratio = image.width / image.height
         except Exception as exc:
             messagebox.showerror("Зображення", f"Не вдалося відкрити файл:\n{exc}")
-            return
+            return False
         height = 12.0
         width = min(20.0, height * ratio)
         if width == 20.0:
             height = width / ratio
+        x, y = position if position else (2.0 + offset_index, 2.0 + offset_index)
+        x = max(0.0, min(x, LABEL_WIDTH_MM - width))
+        y = max(0.0, min(y, LABEL_HEIGHT_MM - height))
         element = {
             "id": uuid.uuid4().hex,
             "type": "image",
-            "x": 2.0,
-            "y": 2.0,
+            "x": round(x, 2),
+            "y": round(y, 2),
             "width": round(width, 2),
             "height": round(height, 2),
             "path": os.path.abspath(path),
@@ -810,6 +1492,7 @@ class LabelDesigner(tk.Tk):
         self.selected_id = element["id"]
         self._render_all()
         self._load_properties()
+        return True
 
     def _replace_image(self):
         """Замінити файл вибраного зображення, не змінюючи його рамку та позицію."""
@@ -820,7 +1503,7 @@ class LabelDesigner(tk.Tk):
         path = filedialog.askopenfilename(
             title="Виберіть нове зображення",
             filetypes=[
-                ("Зображення", "*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff"),
+                ("Зображення", IMAGE_FILETYPES),
                 ("Усі файли", "*.*"),
             ],
         )
@@ -977,7 +1660,7 @@ class LabelDesigner(tk.Tk):
                         tags=("element", element["id"]),
                     )
                 else:
-                    image = Image.open(element["path"]).convert("RGBA")
+                    image = self._transformed_image(element)
                     box_size = (
                         max(1, mm_to_px(element["width"])),
                         max(1, mm_to_px(element["height"])),
@@ -1047,6 +1730,30 @@ class LabelDesigner(tk.Tk):
                     fill="#ffffff", outline="#1976d2", width=2,
                     tags=("selection", "resize_handle", f"resize_{direction}"),
                 )
+            if element and element.get("type") == "image":
+                # Круглий маркер повороту: над рамкою, а якщо там немає місця — під нею.
+                canvas_height = self.canvas.winfo_height() or mm_to_px(LABEL_HEIGHT_MM)
+                if top - 24 >= 8:
+                    anchor_y, handle_y = top, top - 22
+                elif bottom + 24 <= canvas_height - 8:
+                    anchor_y, handle_y = bottom, bottom + 22
+                else:
+                    anchor_y, handle_y = top, top + 22
+                self.canvas.create_line(
+                    middle_x, anchor_y, middle_x, handle_y, fill="#1976d2", width=1,
+                    tags="selection",
+                )
+                rotate_radius = 8
+                self.canvas.create_oval(
+                    middle_x - rotate_radius, handle_y - rotate_radius,
+                    middle_x + rotate_radius, handle_y + rotate_radius,
+                    fill="#1976d2", outline="#ffffff", width=2,
+                    tags=("selection", "rotate_handle"),
+                )
+                self.canvas.create_text(
+                    middle_x, handle_y, text="↻", fill="#ffffff", font=(UI_FONT, 9, "bold"),
+                    tags=("selection", "rotate_handle"),
+                )
 
     def _canvas_click(self, event):
         if self.inline_editor:
@@ -1057,6 +1764,9 @@ class LabelDesigner(tk.Tk):
         hits = self.canvas.find_overlapping(event.x, event.y, event.x, event.y)
         for item in reversed(hits):
             tags = self.canvas.gettags(item)
+            if "rotate_handle" in tags and self.selected_id:
+                self._start_rotate_drag(event)
+                return
             if "resize_handle" in tags and self.selected_id:
                 direction = next(
                     tag[7:] for tag in tags
@@ -1091,6 +1801,7 @@ class LabelDesigner(tk.Tk):
         self.drag_started = False
         self.drag_history_recorded = False
         self.resize_state = None
+        self.rotate_state = None
         if element and element.get("type") == "text":
             guard = self.double_click_guard
             if (
@@ -1160,6 +1871,9 @@ class LabelDesigner(tk.Tk):
     def _canvas_drag(self, event):
         if self.inline_editor:
             return
+        if self.rotate_state:
+            self._rotate_drag(event)
+            return
         if self.resize_state:
             self._resize_selected(event)
             return
@@ -1188,6 +1902,14 @@ class LabelDesigner(tk.Tk):
         self._load_properties()
 
     def _canvas_release(self, _event):
+        if self.rotate_state:
+            self.rotate_state = None
+            self._load_properties()
+            element = self._element()
+            if element:
+                self.status_var.set(
+                    f"Зображення повернуто на {self._normalize_angle(element.get('rotation', 0)):g}°"
+                )
         self.drag_start = None
         self.drag_origin = None
         if self.drag_started:
@@ -1223,6 +1945,7 @@ class LabelDesigner(tk.Tk):
         self.drag_origin = None
         self.drag_started = False
         self.resize_state = None
+        self.rotate_state = None
         self.selected_id = element["id"]
         self._render_all()
         self._start_inline_edit(element, event)
@@ -1376,15 +2099,18 @@ class LabelDesigner(tk.Tk):
         self._load_properties()
 
     def _show_property_frame(self, element_type):
+        if element_type is None:
+            self.element_panel.grid_remove()
+            self.empty_hint.grid()
+            return
+        self.empty_hint.grid_remove()
+        self.element_panel.grid()
         if element_type == "text":
             self.text_frame.grid()
             self.image_frame.grid_remove()
-        elif element_type == "image":
-            self.text_frame.grid_remove()
-            self.image_frame.grid()
         else:
             self.text_frame.grid_remove()
-            self.image_frame.grid_remove()
+            self.image_frame.grid()
 
     def _schedule_live_apply(self, *_args):
         if self.loading_properties:
@@ -1420,7 +2146,22 @@ class LabelDesigner(tk.Tk):
                 self.type_var.set("Зображення" + lock_suffix)
                 self.width_var.set(str(element["width"]))
                 self.height_var.set(str(element["height"]))
-                self.image_path_var.set(element["path"])
+                if element.get("source_kind") in ("qr", "code128"):
+                    kind = "QR-код" if element["source_kind"] == "qr" else "Штрихкод Code 128"
+                    self.image_path_var.set(f"{kind}: {element.get('code_value', '')}")
+                else:
+                    self.image_path_var.set(f"Файл: {Path(element['path']).name}")
+                angle = self._normalize_angle(element.get("rotation", 0))
+                self.rotation_var.set(f"{angle:g}")
+                if not self.rotation_slider_active:
+                    self.rotation_scale_var.set(angle)
+                flips = [
+                    label for key, label in (("flip_h", "по ширині"), ("flip_v", "по висоті"))
+                    if element.get(key)
+                ]
+                self.flip_state_var.set(
+                    "Віддзеркалено " + " і ".join(flips) if flips else "Без віддзеркалення"
+                )
             self._show_property_frame(element["type"])
         finally:
             self.loading_properties = False
@@ -1430,6 +2171,7 @@ class LabelDesigner(tk.Tk):
         element = self._element()
         if not element:
             return False
+        new_rotation = None
         try:
             values = {
                 "x": float(self.x_var.get().replace(",", ".")),
@@ -1451,18 +2193,286 @@ class LabelDesigner(tk.Tk):
                 })
                 if values["width"] <= 0 or values["height"] <= 0:
                     raise ValueError("Розмір зображення має бути більшим за нуль")
+                rotation_text = self.rotation_var.get().strip().replace(",", ".")
+                if not rotation_text:
+                    raise ValueError("Вкажіть кут повороту")
+                new_rotation = self._normalize_angle(float(rotation_text))
         except ValueError as exc:
             if show_error:
                 messagebox.showerror("Властивості", str(exc))
             return False
         changed = any(element.get(key) != value for key, value in values.items())
-        if not changed:
+        rotation_changed = (
+            new_rotation is not None
+            and new_rotation != self._normalize_angle(element.get("rotation", 0))
+        )
+        if not changed and not rotation_changed:
             return True
         self._record_history()
         element.update(values)
+        if rotation_changed:
+            self._set_image_rotation(element, new_rotation)
         self._render_all()
+        if rotation_changed:
+            self._load_properties()
         self.status_var.set("Зміни застосовано автоматично")
         return True
+
+    # ---- Поворот і віддзеркалення зображень ---------------------------------------------
+
+    @staticmethod
+    def _normalize_angle(angle):
+        try:
+            value = round(float(angle) % 360.0, 2)
+        except (TypeError, ValueError):
+            return 0.0
+        return 0.0 if value >= 360.0 else value
+
+    @staticmethod
+    def _rotated_extent(width, height, angle):
+        radians = math.radians(angle)
+        cos_value = abs(math.cos(radians))
+        sin_value = abs(math.sin(radians))
+        return (
+            width * cos_value + height * sin_value,
+            width * sin_value + height * cos_value,
+        )
+
+    @classmethod
+    def _has_transform(cls, element):
+        return bool(
+            cls._normalize_angle(element.get("rotation", 0))
+            or element.get("flip_h")
+            or element.get("flip_v")
+        )
+
+    @classmethod
+    def _apply_image_transform(cls, image, element):
+        """Віддзеркалення, потім поворот за годинниковою стрілкою (кути, кратні 90°, — без втрат)."""
+        if element.get("flip_h"):
+            image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+        if element.get("flip_v"):
+            image = image.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+        angle = cls._normalize_angle(element.get("rotation", 0))
+        exact = {
+            90.0: Image.Transpose.ROTATE_270,
+            180.0: Image.Transpose.ROTATE_180,
+            270.0: Image.Transpose.ROTATE_90,
+        }
+        if angle in exact:
+            image = image.transpose(exact[angle])
+        elif angle:
+            image = image.rotate(
+                -angle, resample=Image.Resampling.BICUBIC, expand=True, fillcolor=(255, 255, 255, 0)
+            )
+        return image
+
+    def _transformed_image(self, element):
+        with Image.open(element["path"]) as source:
+            image = source.convert("RGBA")
+        return self._apply_image_transform(image, element)
+
+    def _image_pixel_size(self, path):
+        try:
+            key = (str(path), os.path.getmtime(path))
+        except OSError:
+            key = (str(path), None)
+        size = self.image_size_cache.get(key)
+        if size is None:
+            with Image.open(path) as image:
+                size = image.size
+            self.image_size_cache[key] = size
+        return size
+
+    def _set_image_rotation(self, element, angle, center=None):
+        """Задати кут; рамка підлаштовується під повернуту картинку, центр лишається на місці."""
+        new_angle = self._normalize_angle(angle)
+        old_angle = self._normalize_angle(element.get("rotation", 0))
+        box_width = max(0.1, float(element["width"]))
+        box_height = max(0.1, float(element["height"]))
+        if center is None:
+            center = (float(element["x"]) + box_width / 2, float(element["y"]) + box_height / 2)
+
+        def quarter(value):
+            return abs(value / 90.0 - round(value / 90.0)) < 1e-6
+
+        old_odd = quarter(old_angle) and round(old_angle / 90.0) % 2 == 1
+        if not element.get("preserve_aspect") and quarter(old_angle) and quarter(new_angle):
+            turned = round((new_angle - old_angle) / 90.0) % 2 == 1
+            new_width, new_height = (box_height, box_width) if turned else (box_width, box_height)
+        else:
+            try:
+                image_width, image_height = self._image_pixel_size(element["path"])
+            except Exception:
+                image_width, image_height = box_width, box_height
+            image_width = max(1, image_width)
+            image_height = max(1, image_height)
+            if element.get("preserve_aspect"):
+                old_width, old_height = self._rotated_extent(image_width, image_height, old_angle)
+                scale = min(box_width / old_width, box_height / old_height)
+            else:
+                # Розтягнуте зображення зі старого шаблону: під довільним кутом
+                # показуємо його у власних пропорціях.
+                base_width, base_height = (
+                    (box_height, box_width) if old_odd else (box_width, box_height)
+                )
+                scale = min(base_width / image_width, base_height / image_height)
+                element["preserve_aspect"] = True
+            new_width, new_height = self._rotated_extent(
+                image_width * scale, image_height * scale, new_angle
+            )
+        new_width = max(0.5, new_width)
+        new_height = max(0.5, new_height)
+        element["rotation"] = new_angle
+        element["width"] = round(new_width, 2)
+        element["height"] = round(new_height, 2)
+        element["x"] = round(center[0] - new_width / 2, 2)
+        element["y"] = round(center[1] - new_height / 2, 2)
+
+    def _selected_image_for_transform(self):
+        element = self._element()
+        if not element or element.get("type") != "image":
+            self.status_var.set("Спочатку виберіть зображення, QR-код або штрихкод")
+            return None
+        if element.get("locked"):
+            self.status_var.set("Елемент заблоковано — спочатку розблокуйте його")
+            return None
+        return element
+
+    def _rotate_selected(self, delta, event=None):
+        if self._event_in_text_input(event) or self.inline_editor:
+            return None
+        element = self._selected_image_for_transform()
+        if element:
+            self._record_history()
+            angle = self._normalize_angle(element.get("rotation", 0)) + delta
+            self._set_image_rotation(element, angle)
+            self._render_all()
+            self._load_properties()
+            self.status_var.set(f"Поворот: {self._normalize_angle(angle):g}°")
+        return "break" if event else None
+
+    def _flip_selected(self, axis):
+        element = self._selected_image_for_transform()
+        if not element:
+            return
+        self._record_history()
+        key = "flip_h" if axis == "h" else "flip_v"
+        # Віддзеркалення відносно екрана: для вже поверненої картинки кут змінює знак.
+        element[key] = not element.get(key)
+        element["rotation"] = self._normalize_angle(-self._normalize_angle(element.get("rotation", 0)))
+        self._render_all()
+        self._load_properties()
+        self.status_var.set(
+            "Віддзеркалено по ширині" if axis == "h" else "Віддзеркалено по висоті"
+        )
+
+    def _reset_image_transform(self):
+        element = self._selected_image_for_transform()
+        if not element or not self._has_transform(element):
+            return
+        self._record_history()
+        self._set_image_rotation(element, 0)
+        element["flip_h"] = False
+        element["flip_v"] = False
+        self._render_all()
+        self._load_properties()
+        self.status_var.set("Поворот і віддзеркалення скинуто")
+
+    def _rotation_scale_pressed(self, _event=None):
+        if self._selected_image_for_transform():
+            self._record_history()
+            self.rotation_slider_active = True
+
+    def _rotation_scale_moved(self, value):
+        if self.loading_properties:
+            return
+        element = self._element()
+        if not element or element.get("type") != "image" or element.get("locked"):
+            return
+        angle = round(float(value))
+        if angle == self._normalize_angle(element.get("rotation", 0)):
+            return
+        if not self.rotation_slider_active:
+            self._record_history()
+        self._set_image_rotation(element, angle)
+        self._render_all()
+        self._load_properties()
+
+    def _rotation_scale_released(self, _event=None):
+        if self.rotation_slider_active:
+            self.rotation_slider_active = False
+            self._load_properties()
+            element = self._element()
+            if element:
+                self.status_var.set(
+                    f"Поворот: {self._normalize_angle(element.get('rotation', 0)):g}°"
+                )
+
+    def _start_rotate_drag(self, event):
+        element = self._element()
+        if not element or element.get("type") != "image" or element.get("locked"):
+            return
+        self._record_history()
+        center_x = float(element["x"]) + float(element["width"]) / 2
+        center_y = float(element["y"]) + float(element["height"]) / 2
+        pointer = math.degrees(
+            math.atan2(event.y - center_y * PX_PER_MM, event.x - center_x * PX_PER_MM)
+        )
+        self.rotate_state = {
+            "center": (center_x, center_y),
+            "pointer": pointer,
+            "rotation": self._normalize_angle(element.get("rotation", 0)),
+        }
+        self.drag_start = None
+        self.resize_state = None
+
+    def _rotate_drag(self, event):
+        state = self.rotate_state
+        element = self._element()
+        if not state or not element:
+            return
+        center_x, center_y = state["center"]
+        pointer = math.degrees(
+            math.atan2(event.y - center_y * PX_PER_MM, event.x - center_x * PX_PER_MM)
+        )
+        angle = state["rotation"] + pointer - state["pointer"]
+        if event.state & 0x0001:
+            angle = round(angle / 15.0) * 15.0
+        else:
+            nearest = round(angle / 90.0) * 90.0
+            angle = nearest if abs(angle - nearest) <= 3 else round(angle)
+        self._set_image_rotation(element, angle, center=state["center"])
+        self._render_all()
+        self._load_properties()
+        self.status_var.set(f"Поворот: {self._normalize_angle(angle):g}° (Shift — крок 15°)")
+
+    def _canvas_motion(self, event):
+        """Підказувати курсором, що можна зробити в цій точці."""
+        if self.drag_start or self.resize_state or self.rotate_state:
+            return
+        hits = self.canvas.find_overlapping(event.x - 1, event.y - 1, event.x + 1, event.y + 1)
+        cursor = ""
+        for item in reversed(hits):
+            tags = self.canvas.gettags(item)
+            if "rotate_handle" in tags:
+                cursor = "exchange"
+                break
+            if "resize_handle" in tags:
+                direction = next(
+                    (tag[7:] for tag in tags if tag.startswith("resize_") and tag != "resize_handle"),
+                    "",
+                )
+                cursor = {"n": "sb_v_double_arrow", "s": "sb_v_double_arrow",
+                          "e": "sb_h_double_arrow", "w": "sb_h_double_arrow"}.get(direction, "sizing")
+                break
+            if "element" in tags:
+                element_id = next((tag for tag in tags if tag not in ("element", "current")), None)
+                element = self._element(element_id)
+                cursor = "" if element and element.get("locked") else "fleur"
+                break
+        if str(self.canvas.cget("cursor")) != cursor:
+            self.canvas.configure(cursor=cursor)
 
     def _layout_data(self, embed_images=False):
         elements = copy.deepcopy(self.elements)
@@ -1516,6 +2526,343 @@ class LabelDesigner(tk.Tk):
         self.current_file = path
         self.status_var.set(f"Переносний макет збережено: {path}")
 
+    def _save_layout_as(self):
+        previous = self.current_file
+        self.current_file = None
+        self._save_layout()
+        if self.current_file is None:
+            self.current_file = previous
+
+    # ---- Розмір наліпки та пресети ------------------------------------------------------
+
+    @staticmethod
+    def _validate_label_size(width, height):
+        width = round(float(str(width).replace(",", ".")), 2)
+        height = round(float(str(height).replace(",", ".")), 2)
+        if not MIN_LABEL_MM <= width <= MAX_LABEL_WIDTH_MM:
+            raise ValueError(
+                f"Ширина наліпки має бути від {MIN_LABEL_MM:g} до {MAX_LABEL_WIDTH_MM:g} мм"
+            )
+        if not MIN_LABEL_MM <= height <= MAX_LABEL_HEIGHT_MM:
+            raise ValueError(
+                f"Висота наліпки має бути від {MIN_LABEL_MM:g} до {MAX_LABEL_HEIGHT_MM:g} мм"
+            )
+        return width, height
+
+    def _load_size_presets(self):
+        last = (LABEL_WIDTH_MM, LABEL_HEIGHT_MM)
+        try:
+            data = json.loads(self.presets_path.read_text(encoding="utf-8"))
+        except Exception:
+            return last
+        for item in data.get("custom", []):
+            try:
+                name = str(item["name"]).strip()
+                width, height = self._validate_label_size(item["width"], item["height"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if name:
+                self.custom_presets.append({"name": name, "width": width, "height": height})
+        saved = data.get("last") or {}
+        try:
+            last = self._validate_label_size(saved["width"], saved["height"])
+        except (KeyError, TypeError, ValueError):
+            pass
+        return last
+
+    def _save_size_presets(self):
+        payload = {
+            "custom": self.custom_presets,
+            "last": {"width": LABEL_WIDTH_MM, "height": LABEL_HEIGHT_MM},
+        }
+        try:
+            self.presets_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except OSError as exc:
+            self.status_var.set(f"Не вдалося зберегти пресети: {exc}")
+
+    def _remember_last_size(self):
+        self._save_size_presets()
+
+    def _preset_entries(self):
+        entries = [
+            {"name": size_text(width, height), "width": width, "height": height, "custom": False}
+            for width, height in BUILTIN_SIZE_PRESETS
+        ]
+        entries.extend(
+            {"name": item["name"], "width": item["width"], "height": item["height"], "custom": True}
+            for item in self.custom_presets
+        )
+        return entries
+
+    @staticmethod
+    def _preset_display(entry):
+        if entry["custom"]:
+            return f"★ {entry['name']} ({size_text(entry['width'], entry['height'])})"
+        return entry["name"]
+
+    def _refresh_size_combo(self):
+        entries = self._preset_entries()
+        self.size_preset_map = {self._preset_display(entry): entry for entry in entries}
+        self.size_combo["values"] = list(self.size_preset_map)
+        current = (LABEL_WIDTH_MM, LABEL_HEIGHT_MM)
+        active = self.size_preset_map.get(self.active_preset_display)
+        if active and (active["width"], active["height"]) == current:
+            self.size_preset_var.set(self.active_preset_display)
+            return
+        for display, entry in self.size_preset_map.items():
+            if (entry["width"], entry["height"]) == current:
+                self.active_preset_display = display
+                self.size_preset_var.set(display)
+                return
+        self.active_preset_display = None
+        self.size_preset_var.set(f"Власний: {size_text(*current)}")
+
+    def _set_label_size(self, width, height):
+        """Лише змінює розмір полотна/макета, без запису в історію."""
+        global LABEL_WIDTH_MM, LABEL_HEIGHT_MM
+        LABEL_WIDTH_MM = float(width)
+        LABEL_HEIGHT_MM = float(height)
+        self._update_canvas_geometry()
+        self.title(APP_TITLE.format(size=size_text(LABEL_WIDTH_MM, LABEL_HEIGHT_MM)))
+        self.size_status_var.set(f"Наліпка: {size_text(LABEL_WIDTH_MM, LABEL_HEIGHT_MM)}")
+        self._refresh_size_combo()
+
+    def _apply_label_size(self, width, height):
+        try:
+            width, height = self._validate_label_size(width, height)
+        except ValueError as exc:
+            messagebox.showerror("Розмір наліпки", str(exc))
+            return False
+        if (width, height) == (LABEL_WIDTH_MM, LABEL_HEIGHT_MM):
+            self._refresh_size_combo()
+            return True
+        self._record_history()
+        self._set_label_size(width, height)
+        self._render_all()
+        self._remember_last_size()
+        outside = 0
+        for element in self.elements:
+            if not element.get("visible", True):
+                continue
+            element_width, element_height = self._element_size_mm(element)
+            if (float(element["x"]) + element_width > LABEL_WIDTH_MM + 0.01
+                    or float(element["y"]) + element_height > LABEL_HEIGHT_MM + 0.01):
+                outside += 1
+        message = f"Розмір наліпки: {size_text(width, height)}"
+        if outside:
+            message += f". Увага: елементів за межами наліпки — {outside}"
+        self.status_var.set(message)
+        return True
+
+    def _size_preset_selected(self, _event=None):
+        entry = self.size_preset_map.get(self.size_preset_var.get())
+        if not entry:
+            return
+        self.active_preset_display = self.size_preset_var.get()
+        self._apply_label_size(entry["width"], entry["height"])
+        self.size_combo.selection_clear()
+
+    def _open_size_presets_dialog(self):
+        if self.presets_dialog and self.presets_dialog.winfo_exists():
+            self.presets_dialog.lift()
+            self.presets_dialog.focus_set()
+            return
+        dialog = tk.Toplevel(self)
+        self.presets_dialog = dialog
+        dialog.title("Пресети розміру наліпок")
+        dialog.configure(bg=COLORS["panel"])
+        dialog.transient(self)
+        dialog.resizable(False, False)
+
+        frame = ttk.Frame(dialog, padding=16)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Розміри наліпок", style="Title.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
+        )
+        listbox = tk.Listbox(
+            frame,
+            height=14,
+            width=34,
+            exportselection=False,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=1,
+            highlightbackground=COLORS["border"],
+            highlightcolor=COLORS["accent"],
+            selectbackground=COLORS["accent"],
+            selectforeground="#ffffff",
+            activestyle="none",
+            font=(UI_FONT, 10),
+        )
+        listbox.grid(row=1, column=0, rowspan=2, sticky="nsew")
+
+        form = ttk.LabelFrame(frame, text="Пресет", padding=10)
+        form.grid(row=1, column=1, sticky="new", padx=(14, 0))
+        name_var = tk.StringVar()
+        width_var = tk.StringVar(value=f"{LABEL_WIDTH_MM:g}")
+        height_var = tk.StringVar(value=f"{LABEL_HEIGHT_MM:g}")
+        ttk.Label(form, text="Назва").grid(row=0, column=0, sticky="w", pady=3)
+        name_entry = ttk.Entry(form, textvariable=name_var, width=22)
+        name_entry.grid(row=0, column=1, sticky="ew", pady=3)
+        ttk.Label(form, text="Ширина, мм").grid(row=1, column=0, sticky="w", pady=3, padx=(0, 8))
+        ttk.Entry(form, textvariable=width_var, width=10).grid(row=1, column=1, sticky="w", pady=3)
+        ttk.Label(form, text="Висота, мм").grid(row=2, column=0, sticky="w", pady=3, padx=(0, 8))
+        ttk.Entry(form, textvariable=height_var, width=10).grid(row=2, column=1, sticky="w", pady=3)
+
+        buttons = ttk.Frame(form)
+        buttons.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        buttons.columnconfigure(0, weight=1)
+        buttons.columnconfigure(1, weight=1)
+        ttk.Label(
+            frame,
+            text=(f"Вбудовані пресети не змінюються. Власні позначено ★.\n"
+                  f"Ширина {MIN_LABEL_MM:g}–{MAX_LABEL_WIDTH_MM:g} мм, "
+                  f"висота {MIN_LABEL_MM:g}–{MAX_LABEL_HEIGHT_MM:g} мм."),
+            style="Hint.TLabel",
+            justify="left",
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
+        state = {"entries": []}
+
+        def fill_list(select_name=None):
+            state["entries"] = self._preset_entries()
+            listbox.delete(0, tk.END)
+            current = (LABEL_WIDTH_MM, LABEL_HEIGHT_MM)
+            select_index = None
+            for index, entry in enumerate(state["entries"]):
+                marker = "★ " if entry["custom"] else "    "
+                text = entry["name"] if not entry["custom"] else (
+                    f"{entry['name']}  —  {size_text(entry['width'], entry['height'])}"
+                )
+                if (entry["width"], entry["height"]) == current:
+                    text += "   ✓"
+                listbox.insert(tk.END, marker + text)
+                if select_name is not None and entry["custom"] and entry["name"] == select_name:
+                    select_index = index
+            if select_index is not None:
+                listbox.selection_clear(0, tk.END)
+                listbox.selection_set(select_index)
+                listbox.see(select_index)
+            self._refresh_size_combo()
+
+        def selected_entry():
+            selection = listbox.curselection()
+            if not selection:
+                return None
+            return state["entries"][selection[0]]
+
+        def on_select(_event=None):
+            entry = selected_entry()
+            if not entry:
+                return
+            name_var.set(entry["name"] if entry["custom"] else "")
+            width_var.set(f"{entry['width']:g}")
+            height_var.set(f"{entry['height']:g}")
+
+        def read_form(require_name=True):
+            name = " ".join(name_var.get().split())
+            if require_name and not name:
+                raise ValueError("Вкажіть назву пресету, наприклад «Цінник 58×40»")
+            width, height = self._validate_label_size(width_var.get(), height_var.get())
+            return name, width, height
+
+        def add_preset():
+            try:
+                name, width, height = read_form()
+            except ValueError as exc:
+                messagebox.showerror("Пресет", str(exc), parent=dialog)
+                return
+            if any(item["name"].casefold() == name.casefold() for item in self.custom_presets):
+                messagebox.showerror("Пресет", f"Пресет «{name}» уже існує", parent=dialog)
+                return
+            self.custom_presets.append({"name": name, "width": width, "height": height})
+            self._save_size_presets()
+            fill_list(select_name=name)
+            self.status_var.set(f"Додано пресет «{name}» ({size_text(width, height)})")
+
+        def update_preset():
+            entry = selected_entry()
+            if not entry or not entry["custom"]:
+                messagebox.showinfo("Пресет", "Виберіть у списку власний пресет (★)", parent=dialog)
+                return
+            try:
+                name, width, height = read_form()
+            except ValueError as exc:
+                messagebox.showerror("Пресет", str(exc), parent=dialog)
+                return
+            if any(
+                item["name"].casefold() == name.casefold() and item["name"] != entry["name"]
+                for item in self.custom_presets
+            ):
+                messagebox.showerror("Пресет", f"Пресет «{name}» уже існує", parent=dialog)
+                return
+            for item in self.custom_presets:
+                if item["name"] == entry["name"]:
+                    item.update({"name": name, "width": width, "height": height})
+                    break
+            self._save_size_presets()
+            fill_list(select_name=name)
+            self.status_var.set(f"Пресет «{name}» оновлено")
+
+        def delete_preset():
+            entry = selected_entry()
+            if not entry or not entry["custom"]:
+                messagebox.showinfo("Пресет", "Видаляти можна лише власні пресети (★)", parent=dialog)
+                return
+            if not messagebox.askyesno(
+                "Пресет", f"Видалити пресет «{entry['name']}»?", parent=dialog
+            ):
+                return
+            self.custom_presets = [
+                item for item in self.custom_presets if item["name"] != entry["name"]
+            ]
+            self._save_size_presets()
+            fill_list()
+            self.status_var.set(f"Пресет «{entry['name']}» видалено")
+
+        def apply_size(_event=None):
+            try:
+                _name, width, height = read_form(require_name=False)
+            except ValueError as exc:
+                messagebox.showerror("Розмір наліпки", str(exc), parent=dialog)
+                return
+            entry = selected_entry()
+            if entry and (entry["width"], entry["height"]) == (width, height):
+                self.active_preset_display = self._preset_display(entry)
+            if self._apply_label_size(width, height):
+                selection = listbox.curselection()
+                fill_list()
+                if selection:
+                    listbox.selection_set(selection[0])
+
+        ttk.Button(buttons, text="+ Додати новий", command=add_preset, style="Tool.TButton").grid(
+            row=0, column=0, sticky="ew", padx=(0, 2)
+        )
+        ttk.Button(buttons, text="Зберегти зміни", command=update_preset, style="Tool.TButton").grid(
+            row=0, column=1, sticky="ew", padx=(2, 0)
+        )
+        ttk.Button(buttons, text="Видалити", command=delete_preset, style="Tool.TButton").grid(
+            row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0)
+        )
+        ttk.Button(
+            buttons, text="Застосувати до макета", command=apply_size, style="Accent.TButton"
+        ).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        ttk.Button(buttons, text="Закрити", command=dialog.destroy).grid(
+            row=3, column=0, columnspan=2, sticky="ew", pady=(4, 0)
+        )
+
+        listbox.bind("<<ListboxSelect>>", on_select)
+        listbox.bind("<Double-Button-1>", lambda event: (on_select(), apply_size()))
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        fill_list()
+        name_entry.focus_set()
+        dialog.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - dialog.winfo_width()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - dialog.winfo_height()) // 3
+        dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+
     def _load_layout(self):
         path = filedialog.askopenfilename(
             title="Відкрити макет", filetypes=[("Макет наліпки", "*.json"), ("Усі файли", "*.*")]
@@ -1549,7 +2896,7 @@ class LabelDesigner(tk.Tk):
                     replacement = filedialog.askopenfilename(
                         title=f"Знайдіть зображення для старого шаблону: {Path(missing).name}",
                         filetypes=[
-                            ("Зображення", "*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff"),
+                            ("Зображення", IMAGE_FILETYPES),
                             ("Усі файли", "*.*"),
                         ],
                     )
@@ -1561,9 +2908,17 @@ class LabelDesigner(tk.Tk):
                     except Exception as exc:
                         raise ValueError(f"Не вдалося відкрити зображення: {exc}") from exc
                     element["path"] = os.path.abspath(replacement)
+        try:
+            size = self._validate_label_size(
+                data.get("label_width_mm", 50.0), data.get("label_height_mm", 30.0)
+            )
+        except (TypeError, ValueError):
+            size = (50.0, 30.0)
         self.elements = elements
         self.layout_locked = bool(data.get("layout_locked", False))
         self.selected_id = None
+        self._set_label_size(*size)
+        self._remember_last_size()
         self._render_all()
         self._load_properties()
 
@@ -1711,6 +3066,12 @@ $items = @(
         }
         color, prefix = colors[state]
         self.connection_status_label.configure(text=prefix + text, fg=color)
+        short = {
+            "ok": "Принтер підключено",
+            "error": "Принтер недоступний",
+            "checking": "Перевірка принтера…",
+        }[state]
+        self.status_conn_label.configure(text=prefix + short, fg=color)
 
     def _schedule_connection_check(self, *_args):
         self.connection_after_id = None
@@ -1970,7 +3331,7 @@ if ($queue) {{
         layouts = []
         try:
             for row in rows:
-                layouts.append(self._layout_for_data_row(row))
+                layouts.append(self._print_ready_layout(self._layout_for_data_row(row)))
         except Exception as exc:
             messagebox.showerror("Серійний друк", f"Не вдалося сформувати етикетки:\n{exc}")
             return
@@ -1989,6 +3350,34 @@ if ($queue) {{
             args=(layouts, printer, copies, self.connection_var.get(), self.network_ip_var.get().strip()),
             daemon=True,
         ).start()
+
+    def _print_ready_layout(self, layout):
+        """Копія макета, де повернуті/віддзеркалені зображення замінено готовими PNG.
+
+        Сам механізм друку не змінюється: він, як і раніше, малює файл у рамці елемента.
+        """
+        layout = copy.deepcopy(layout)
+        folder = self.data_dir / "print_cache"
+        for element in layout.get("elements", []):
+            if (element.get("type") != "image" or not element.get("visible", True)
+                    or not self._has_transform(element)):
+                continue
+            source = os.path.abspath(element.get("path", ""))
+            stat = os.stat(source)
+            key = hashlib.sha256(json.dumps([
+                source,
+                stat.st_mtime_ns,
+                stat.st_size,
+                self._normalize_angle(element.get("rotation", 0)),
+                bool(element.get("flip_h")),
+                bool(element.get("flip_v")),
+            ]).encode("utf-8")).hexdigest()[:32]
+            target = folder / f"{key}.png"
+            if not target.is_file():
+                folder.mkdir(parents=True, exist_ok=True)
+                self._transformed_image(element).save(target, "PNG")
+            element["path"] = str(target)
+        return layout
 
     def _batch_print_worker(self, layouts, printer, copies, mode, ip):
         completed_count = 0
@@ -2030,10 +3419,15 @@ if ($queue) {{
                 messagebox.showerror("Друк", f"Не знайдено зображення:\n{element['path']}")
                 return
 
+        try:
+            layout = self._print_ready_layout(self._layout_data())
+        except Exception as exc:
+            messagebox.showerror("Друк", f"Не вдалося підготувати зображення:\n{exc}")
+            return
+
         self.print_button.configure(state="disabled")
         self.printing_active = True
         self.status_var.set("Надсилання на принтер…")
-        layout = self._layout_data()
         mode = self.connection_var.get()
         ip = self.network_ip_var.get().strip()
         threading.Thread(
