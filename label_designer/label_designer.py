@@ -32,7 +32,7 @@ import qrcode
 from barcode.writer import ImageWriter
 
 
-APP_TITLE = "Редактор наліпок {size} — Xprinter"
+APP_TITLE = "Xprinter Label Studio — {size}"
 LABEL_WIDTH_MM = 50.0
 LABEL_HEIGHT_MM = 30.0
 BASE_PX_PER_MM = 14
@@ -66,23 +66,257 @@ BUILTIN_SIZE_PRESETS = (
 )
 ZOOM_LEVELS = ("50%", "75%", "100%", "125%", "150%", "200%", "300%")
 UI_FONT = "Segoe UI"
-COLORS = {
-    "panel": "#ffffff",
-    "soft": "#f4f6f9",
-    "border": "#d8dee6",
-    "text": "#1f2933",
-    "muted": "#6b7785",
-    "accent": "#1f6feb",
-    "accent_hover": "#1a5fd0",
-    "accent_pressed": "#154fae",
-    "accent_soft": "#e8f0fe",
-    "workspace": "#d3d8df",
-    "shadow": "#aeb6c1",
-    "status": "#eef1f5",
-    "ok": "#087f23",
-    "error": "#c00000",
-    "checking": "#9a6700",
+APP_NAME = "Xprinter Label Studio"
+THEMES = {
+    "light": {
+        "title": "Світла",
+        "dark": False,
+        "panel": "#ffffff",
+        "header": "#ffffff",
+        "soft": "#f1f4f9",
+        "border": "#dde3ec",
+        "text": "#151b28",
+        "muted": "#6a7587",
+        "field": "#ffffff",
+        "accent": "#2563eb",
+        "accent_hover": "#1d4fd8",
+        "accent_pressed": "#1a43b8",
+        "accent_soft": "#e7eefe",
+        "accent_text": "#ffffff",
+        "accent_disabled": "#a8bff3",
+        "pressed": "#d5e2fc",
+        "workspace": "#e4e8ef",
+        "shadow": "#c3cad6",
+        "glow": (),
+        "status": "#f5f7fa",
+        "ok": "#15803d",
+        "error": "#c62828",
+        "checking": "#a16207",
+        "ok_hint": "#3f7d4f",
+        "selection": "#2563eb",
+        "tooltip_bg": "#151b28",
+        "tooltip_fg": "#ffffff",
+        "logo_gear": "#151b28",
+        "logo_bolt": "#2563eb",
+    },
+    "purple": {
+        "title": "Фіолетова",
+        "dark": True,
+        "panel": "#1a1430",
+        "header": "#120d24",
+        "soft": "#251c43",
+        "border": "#3b2e66",
+        "text": "#efe9ff",
+        "muted": "#a193cf",
+        "field": "#120d24",
+        "accent": "#a855f7",
+        "accent_hover": "#b872fb",
+        "accent_pressed": "#8f3ce6",
+        "accent_soft": "#2e2356",
+        "accent_text": "#ffffff",
+        "accent_disabled": "#4c3a78",
+        "pressed": "#3a2a6b",
+        "workspace": "#0d0919",
+        "shadow": "#000000",
+        "glow": ("#170f2c", "#211343", "#2f175f", "#43207f"),
+        "status": "#120d24",
+        "ok": "#4ade80",
+        "error": "#f87171",
+        "checking": "#fbbf24",
+        "ok_hint": "#86efac",
+        "selection": "#9333ea",
+        "tooltip_bg": "#efe9ff",
+        "tooltip_fg": "#1a1430",
+        "logo_gear": "#efe9ff",
+        "logo_bolt": "#c084fc",
+    },
+    "black": {
+        "title": "Чорна",
+        "dark": True,
+        "panel": "#0f1115",
+        "header": "#08090b",
+        "soft": "#181b21",
+        "border": "#2a2f38",
+        "text": "#e8ecf2",
+        "muted": "#8a93a3",
+        "field": "#08090b",
+        "accent": "#22d3ee",
+        "accent_hover": "#4fdcf2",
+        "accent_pressed": "#0fb5cf",
+        "accent_soft": "#10262c",
+        "accent_text": "#031014",
+        "accent_disabled": "#1d4a52",
+        "pressed": "#123a42",
+        "workspace": "#050608",
+        "shadow": "#000000",
+        "glow": ("#07161a", "#092128", "#0b3039", "#0e4450"),
+        "status": "#08090b",
+        "ok": "#4ade80",
+        "error": "#f87171",
+        "checking": "#fbbf24",
+        "ok_hint": "#86efac",
+        "selection": "#0891b2",
+        "tooltip_bg": "#e8ecf2",
+        "tooltip_fg": "#0f1115",
+        "logo_gear": "#e8ecf2",
+        "logo_bolt": "#22d3ee",
+    },
 }
+DEFAULT_THEME = "light"
+# Поточна палітра; оновлюється на місці при зміні теми.
+COLORS = dict(THEMES[DEFAULT_THEME])
+# Ctrl+літера має працювати й в українській/російській розкладці:
+# у Windows беремо віртуальний код клавіші, інакше — кириличний keysym.
+CTRL_KEY_VK = {
+    65: "a", 67: "c", 68: "d", 78: "n", 79: "o", 82: "r", 83: "s", 86: "v", 88: "x", 89: "y", 90: "z",
+}
+# Linux/X11: фізичні коди клавіш стандартної PC-клавіатури.
+CTRL_KEY_X11 = {
+    38: "a", 54: "c", 40: "d", 57: "n", 32: "o", 27: "r", 39: "s", 55: "v", 53: "x", 29: "y", 52: "z",
+}
+CTRL_KEY_CYRILLIC = {
+    "Cyrillic_ef": "a", "Cyrillic_es": "c", "Cyrillic_ve": "d", "Cyrillic_te": "n",
+    "Cyrillic_shcha": "o", "Cyrillic_ka": "r", "Cyrillic_yeru": "s", "Ukrainian_i": "s",
+    "Cyrillic_em": "v", "Cyrillic_che": "x", "Cyrillic_en": "y", "Cyrillic_ya": "z",
+}
+# Логотип: дві маски (шестерня і блискавка), щоб фарбувати їх під тему.
+LOGO_GEAR_MASK = (
+    "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"
+)
+LOGO_BOLT_MASK = (
+    "iVBORw0KGgoAAAANSUhEUgAAAKAAAACgCAAAAACupDjxAAAMWklEQVR42s2ceZRdVZXG9znnvpdU5omQxCIhaCwMC6cQIygu"
+    "ggIBumkVgpimncBIWhvadi0B0XYJRluCGGmHtAFxgASFQNAITZrBSAbQQKOGRGRQwtSYqaiEenufve/9+o/7Eoqk3ivs1nvv"
+    "/fuudX/17f3ts88+5xVRgY//P7zriuTLXnXGIR11DwDk6nWPVAzOuUBpbNBgh6RWTyCS+e5lv3Gggp9AM5/DK31efGdTQ1eg"
+    "foesndzwA+viiCgd8tAsLVZC5zvWg01fgXpmpumeybmESWF86dVHS4JkhwHOOUKaZs6H4ACAfFIjg8vMKA4bBwLt2EkoEjDY"
+    "pfMksUEL/z0zePKUWQrnQs0hAxBqdTJQFjOZcMu4zGe1xXtCWmCAE/ogRBnLB3xz/P2Ixrjqz6pJfwEDH8eqjPVDfHD9P947"
+    "52o0ZRPEGN8kX2gBpK7/yaLgyc72ugSa/DDYGNcWzTd2M0St5y0U2vNN2Qw2wdJi+Vyo3QHWiDPaW7LJx1hMrkg+SujbYGN8"
+    "aiC+yTnfV4vVjxI6H2yMqyhxr0S/Kyi4Yg18gkVlrPKhPd+rHgab4MrC+Y7Ykarg16Ocb/vaxJzv8oL5PI3fAonptq62Bg40"
+    "6SGICRYVnH+OBq+BqKRz2hrE0/gHwcZYVLB+Lgy/FWyCjw/AN+aXpfjD1WgpGtbA4gH4Rt3brH/F8hHRe8HGuNm1+7Cn4WvA"
+    "xvhG0Xxh7Mm7owruG9nOwJ5G3AM2xneK5vP0xj3QmG6b0s7Anobfg4YxlhXsX/Ju2LpMNGantUvAQKPWoGGMG0LBfC7QjRAT"
+    "LGiv36hfgI3xo8T5Yu2R0CKwMb7QTj9Po9eDjXFDKJ7vPIgxrmvXIQQak/MtL4FvjkZl3Nvh/UD6NbAsuILrX6Dp29MY8egE"
+    "asc3Yh3YGD/wRevn3djNkJh2v6GNQTwNvSvnc0XzuRBuB2tMT23L13EHGuXwJXQV2BjntzGwp8GrwMa4zhedf5TQBRBlXNWW"
+    "b9BPwdbAjaEEvnenUQW3h9ZLq6dBPwEbY2W9cL5AM3pMBZvHtjawp6G3g62BVYOo4PwjT51/RIzZ9umtDeJpyGo0jPGzjsL5"
+    "nBu6AaIaT2jD5zr+E2yM20rgS+gGsAk+0togzoUfo2ENbCiejxL6AtgYl7bm8y4sBxvjjoPIFc83r9khtDSwc2EZ2BhrRpah"
+    "3zG9qoK1g1v2ns6769AwweMHtx90/XUKzLRnsxizra2HgM7Td3P9Jg8qPL6Oxv4Gotr7tpbauEDfRsMY946iwh8XktVgi3h/"
+    "S4O4QF8DG2PtqOLjSwl9HWyCi1rzJfQliAnuG1O8PyihD4GV8Y12fJ+DGOPBg0rhO7ahKljVukNI6EKICR6eVEJ8A73m2SxG"
+    "PDK2ZfOZ0L9AVPDY1BL4PI3bhKi2Z0bLjyd0PkQFW7tK4HOhdifYIs5qmYAJ/SOiCp45sgQ+SmgJ2ASfbsP3UUQVPP+mcvgW"
+    "7J3it3zjw1AV/GlmYWeXL/v68aIqWNlyCJjQ2ZmqYMesMvgCTd+WRsGmlkPAhM4y1Yidx5TB52nC7yBqL7y+VXYl9HfRNGa7"
+    "ji2Dz/nBvwBrxHta881ppDFmu2eXwUcJfRdsgn9u9fWEZu9JY0x7TyyJ74Lm8UHSKkOP6c5iNPmbkvhO0aiMH7Vq8QO9eTui"
+    "mp5eCl+gN+xKVfDgMNeKb/rTEI3ZPKpRGQbufAIS051dLdqnQFOfgGjEOaXwOT/0frBGO6WFgQNN2gxRwT+VEl+X0HKwCha0"
+    "+Lyngx6AmODCUvgooYvQMMHClnwj14NNcGn7g/a/Ht9paVTGD1oYeN+A98riDwjz/Hpjt6lgQ4dvwdccEC0ph89T5+OIMXv+"
+    "sP4N7H19FRrG+GHRB3B7ByzD7gdrjCf1b2DvKB8Q/bj4AW9zA34T2AQf698gnvy1YGPcWi+FjxL6Eti4lYEDDbsFbIyfDS5h"
+    "A9zco4sxvt9//geauBYNi9gw0gcqxcBva2gUrOl/yJZQ12Y0LGb3JkTkkv+3if/cP9JnU24fnVH9jyd393eP2KdH3zY1JkSu"
+    "+/CJaa9kIF/oXVnnh/wSorZ7Zr9/mqczetLeqGYGwLbefeVJrtBEdIGWgS3izH4N4mnGUwCAyCIsBgA/n1bkLHrvlPxfWzUA"
+    "tZEz5l/9qxcAIBVmZsbjE4orNoHOhhjjhwM0AJPnfHblowoAqb2IrxY2TvDNKfn6Ia0XMOeTHKfjyH9YvPoptZhtqhUUZOdG"
+    "P4YYsbVzoLz3IcnfqK8DY+vwggAT+jhYU377K+pAna8HuoxVsgeLWpED3ZyxNk4lopAMfA8n0JDrYdZofzPlLxpiWgNJX1h4"
+    "+rR6Hsi2lAkdmt+Z2DK2KBcHuiVly4DeLSs+d9pr6k3qVgXzHU+CjfHo4YVV6kBzETmyZADQu2XFZ089LLTyE32kATbGus4C"
+    "VxJPXwSgzMxNyp7fXd6fhoHcIljUiOuHFjpTdfSuG5/J17KoUVgMf9sPQKDRP4FoTPF5Krgl9ESjj1mw9L5tgJkZ45J++BKa"
+    "/hDYBD3vL35LEnJBJhx7iZoJ7jrw4MYFOvH53B4zyxkphCQ4osWI0bYdekAEnaMFClHG6gnljBTyIJ6DaIL3HRBgT+4KaFTF"
+    "khqFsvg8dXWbCpYcIFGgUSshKhk+Rc6XxedCbR0k4rfD9rdAQl3/DTbGrneXM1Hos+3U2HvUfjF0Cb3zObAxHnlTeelHFOjE"
+    "LBofMDh3nj4WISr4rwll8nk3/sk0Cm7dL4ie6CuwqIqlJdqDiALdBInp0xNeboJAI1bk9riQyJfKdx5EJdvvdmVC0zaCjdF9"
+    "epn2IPI0vUdVsOhlWeYCzX4GbA38fkaZ6UfkQn0DJOJXg/rK5DydyxAV3D2xXD5KaCFEdc+RfdNsrz0irh5Uqj2IAs1OozI+"
+    "0VenQCNugmjMcHG59iDyfsxj2f4VJqFpG9EwwQtzy7UHESX0PXBMn530UoVxCc1+tszm6uUBngdR6Xs27Dydk9vjnkml83k6"
+    "dLtFwbdeIvFEC3N7XFO2PYhccKsRIza91MMEGnI9RCXFZ8q2BxEFugiiUd66T6qEJq/L9x5nlm4PokCzJKrgkn0BTuitfwAb"
+    "44lZpacfkfPDfosouHvvLsl5mrs7v67YWQG+/PqT2o5XN3PNE12MNGrE9UNKtwcRBToTYoKzmzCB6ksRNRouq4A9iDxN3WbK"
+    "uLbJl9DBd4JNwB8u57TwgAoT7oJI9shI3/z3G0dsARvjudnlnFYfmICfB2uMzQvICR2Xjw42TquCPYgCHadRBZ/JcRKa2wtR"
+    "wc0jq2APIu/GPJ5FwWofHJELNB9pVMXXKmEPIgq0HBLt+UPIEzlPF0M1pvgk+arwzYeo4L0UiJynf0PUmDXmVWB1a1aYI3ar"
+    "Cr5OCZEntwSsgp0nVMMeRC4Muh8S8UCHd+SpfgPYGE/NrApf/itc1RdfT54CjbgtH710VYYv0Jwsav4r5kAT7wMb44FDKsPn"
+    "6aCtWRSsoIQS6sqXjzXjqlH+iMiF5GZIzLaOdz6htzwDNsZPh1aGjxL6JNgkO5lCQifsgpjg2lpFynPew/SoCq6gJKH3NCAa"
+    "cUWJk90DAlwbsR4SsXFwqNHfq4kqLqxEd7VPwGUQjTqL6vShzGK09NyqLB95hTmqV1XwZUroAmiMGc+tTHkhIu/HPYYoWD/Y"
+    "Jf8B1Yg9p1SJjxK6DqzW/VpKbgSbpLuOrxRfoA9AVHAOjV4FNoGeXCk+T6/dZSr4Fo1fm2/Oj60Unwu1tYiCLbXOjWBr4NGp"
+    "1SnPeQJ+BaxRX3fYI2AT/OHNpdwlb5OAJyEq49zD85OtZaN8pfTz7uCn0ij43tvz5fcaR46qFeAVEMWvF/QgasQiqpZ+FOg8"
+    "sKY9K/cgquLiKi2/eYV5XY+qZT0CjamdW43hRt8KU18HMbPMVLLe0ytV/vIAXwY2MzMT7Dy+gnzv0KhNvqdnVo7P+ZG/R7T8"
+    "0k6Fdpd9Ksw1kCbfA53V2R29FOD37eOr0O6yT4WZ8ieLOd+qodXjc8HfkQvIWF6vVvvSDPCnwWamgu/4SvIdLVHNNOLyqi1v"
+    "eYUZ/jCiWYzVW36bFWYpxCym6fwq7X77BPgsiJmg98zqled8DrPdogl2vquSfM4nd0KM8fRRleSjQJ+AGGNLVzX5yNNd2tvA"
+    "xkkV5aNAXwRwdwWX371EbkOH//783T6jSj++gkz/C76LFxB/RZ/wAAAAAElFTkSuQmCC"
+)
+
+
+def _logo_mask(data):
+    return Image.open(io.BytesIO(base64.b64decode("".join(data)))).convert("L")
+
+
+def render_logo(size, gear_color, bolt_color, background=None):
+    """Логотип заданого розміру у кольорах теми (RGBA)."""
+    logo = Image.new("RGBA", (size, size), background or (0, 0, 0, 0))
+    for data, color in ((LOGO_GEAR_MASK, gear_color), (LOGO_BOLT_MASK, bolt_color)):
+        mask = _logo_mask(data).resize((size, size), Image.Resampling.LANCZOS)
+        layer = Image.new("RGBA", (size, size), color)
+        layer.putalpha(mask)
+        logo.alpha_composite(layer)
+    return logo
+
+
+def render_app_icon(size, start="#7c3aed", end="#06b6d4"):
+    """Іконка програми: закруглена плитка з градієнтом і білим логотипом."""
+    from PIL import ImageDraw
+
+    scale = 4
+    big = size * scale
+    start_rgb = Image.new("RGB", (1, 1), start).getpixel((0, 0))
+    end_rgb = Image.new("RGB", (1, 1), end).getpixel((0, 0))
+    gradient = Image.new("RGBA", (big, big))
+    pixels = gradient.load()
+    for y in range(big):
+        for x in range(big):
+            t = (x + y) / (2 * big - 2)
+            pixels[x, y] = tuple(round(s + (e - s) * t) for s, e in zip(start_rgb, end_rgb)) + (255,)
+    mask = Image.new("L", (big, big), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, big - 1, big - 1), radius=big // 5, fill=255)
+    tile = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    tile.paste(gradient, (0, 0), mask)
+    inner = round(big * 0.78)
+    logo = render_logo(inner, "#ffffff", "#ffffff")
+    tile.alpha_composite(logo, ((big - inner) // 2, (big - inner) // 2))
+    return tile.resize((size, size), Image.Resampling.LANCZOS)
+
+
 LOCAL_DRIVER_SOURCE = (
     r"C:\Windows\System32\DriverStore\FileRepository"
     r"\xprinter.inf_amd64_a2184ce9ef55d7a6"
@@ -138,8 +372,8 @@ class ToolTip:
         tk.Label(
             self.tip,
             text=self.text,
-            bg="#1f2933",
-            fg="#ffffff",
+            bg=COLORS["tooltip_bg"],
+            fg=COLORS["tooltip_fg"],
             font=(UI_FONT, 9),
             padx=8,
             pady=4,
@@ -157,7 +391,7 @@ class LabelDesigner(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE.format(size=size_text(LABEL_WIDTH_MM, LABEL_HEIGHT_MM)))
-        self.geometry("1280x840")
+        self.geometry("1320x860")
         self.minsize(1120, 740)
 
         self.elements = []
@@ -202,9 +436,14 @@ class LabelDesigner(tk.Tk):
         self.recovery_payload = self._read_autosave_payload()
         self.presets_path = self.data_dir / "size_presets.json"
         self.custom_presets = []
+        self.theme_name = DEFAULT_THEME
         last_size = self._load_size_presets()
+        COLORS.clear()
+        COLORS.update(THEMES[self.theme_name])
 
         self._build_ui()
+        self._apply_window_icon()
+        self._set_theme(self.theme_name, save=False)
         try:
             self._set_label_size(*self._validate_label_size(*last_size))
         except (TypeError, ValueError):
@@ -216,136 +455,328 @@ class LabelDesigner(tk.Tk):
         self.connection_after_id = self.after(500, self._schedule_connection_check)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+    # ---- Тема оформлення -----------------------------------------------------------------
+
     def _setup_style(self):
-        self.configure(bg=COLORS["panel"])
+        """Налаштувати стилі ttk під поточну тему (можна викликати повторно)."""
+        c = COLORS
+        self.configure(bg=c["panel"])
         for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
             try:
                 tkfont.nametofont(name).configure(family=UI_FONT, size=10)
             except tk.TclError:
                 pass
         style = ttk.Style(self)
-        if "clam" in style.theme_names():
+        if "clam" in style.theme_names() and style.theme_use() != "clam":
             style.theme_use("clam")
-        panel = COLORS["panel"]
-        border = COLORS["border"]
-        accent = COLORS["accent"]
+        panel, border, accent, soft = c["panel"], c["border"], c["accent"], c["soft"]
         style.configure(
             ".",
             background=panel,
-            foreground=COLORS["text"],
+            foreground=c["text"],
             font=(UI_FONT, 10),
             bordercolor=border,
             lightcolor=panel,
             darkcolor=panel,
             focuscolor=accent,
-            troughcolor=COLORS["soft"],
+            troughcolor=soft,
+            selectbackground=accent,
+            selectforeground=c["accent_text"],
+            insertcolor=c["text"],
+            arrowcolor=c["muted"],
+            fieldbackground=c["field"],
         )
+        style.map(".", foreground=[("disabled", c["muted"])])
         style.configure("TFrame", background=panel)
-        style.configure("TLabel", background=panel)
-        style.configure("Title.TLabel", font=(UI_FONT, 11, "bold"))
-        style.configure("Caption.TLabel", foreground=COLORS["muted"], font=(UI_FONT, 8))
-        style.configure("Hint.TLabel", foreground=COLORS["muted"], font=(UI_FONT, 9))
-        style.configure("Ok.TLabel", foreground="#4b6b4b", font=(UI_FONT, 9))
-        style.configure("Status.TFrame", background=COLORS["status"])
-        style.configure("Status.TLabel", background=COLORS["status"], foreground=COLORS["text"], font=(UI_FONT, 9))
+        style.configure("Header.TFrame", background=c["header"])
+        style.configure("TLabel", background=panel, foreground=c["text"])
+        style.configure("Header.TLabel", background=c["header"], foreground=c["text"])
         style.configure(
-            "TLabelframe", background=panel, bordercolor=border, relief="solid", borderwidth=1
+            "Brand.TLabel", background=c["header"], foreground=c["text"], font=(UI_FONT, 13, "bold")
         )
         style.configure(
-            "TLabelframe.Label", background=panel, foreground=COLORS["muted"], font=(UI_FONT, 9, "bold")
+            "BrandSub.TLabel", background=c["header"], foreground=c["muted"], font=(UI_FONT, 8)
         )
-        # width=0: кнопки за шириною тексту, а не з мінімальною шириною теми clam.
-        for name, pad in (("TButton", (10, 5)), ("Tool.TButton", (7, 4))):
+        style.configure("Title.TLabel", font=(UI_FONT, 12, "bold"))
+        style.configure("Caption.TLabel", foreground=c["muted"], font=(UI_FONT, 7, "bold"))
+        style.configure("Hint.TLabel", foreground=c["muted"], font=(UI_FONT, 9))
+        style.configure("Ok.TLabel", foreground=c["ok_hint"], font=(UI_FONT, 9))
+        style.configure("Status.TFrame", background=c["status"])
+        style.configure("Status.TLabel", background=c["status"], foreground=c["muted"], font=(UI_FONT, 9))
+        style.configure(
+            "TLabelframe", background=panel, bordercolor=border, relief="solid", borderwidth=1,
+            lightcolor=border, darkcolor=border,
+        )
+        style.configure(
+            "TLabelframe.Label", background=panel, foreground=accent, font=(UI_FONT, 8, "bold")
+        )
+        style.configure("TSeparator", background=border)
+
+        def flat_button(name, padding, bg, fg, hover, pressed, font=(UI_FONT, 10), border_color=None):
+            border_color = border_color or bg
             style.configure(
-                name,
-                padding=pad,
-                width=0,
-                background=COLORS["soft"],
-                bordercolor=border,
-                lightcolor=COLORS["soft"],
-                darkcolor=COLORS["soft"],
-                focusthickness=0,
+                name, padding=padding, width=0, background=bg, foreground=fg, font=font,
+                bordercolor=border_color, lightcolor=bg, darkcolor=bg, focusthickness=0,
+                relief="flat", anchor="center",
             )
             style.map(
                 name,
-                background=[("pressed", "#d4e3fc"), ("active", COLORS["accent_soft"])],
-                lightcolor=[("pressed", "#d4e3fc"), ("active", COLORS["accent_soft"])],
-                darkcolor=[("pressed", "#d4e3fc"), ("active", COLORS["accent_soft"])],
-                bordercolor=[("active", "#9ec0f5")],
+                background=[("disabled", c["accent_disabled"] if name == "Accent.TButton" else bg),
+                            ("pressed", pressed), ("active", hover)],
+                lightcolor=[("pressed", pressed), ("active", hover)],
+                darkcolor=[("pressed", pressed), ("active", hover)],
+                bordercolor=[("active", accent if name != "Accent.TButton" else hover)],
+                foreground=[("disabled", c["muted"] if name != "Accent.TButton" else c["accent_text"])],
             )
+
+        flat_button("TButton", (10, 5), soft, c["text"], c["accent_soft"], c["pressed"], border_color=border)
+        flat_button("Tool.TButton", (8, 5), soft, c["text"], c["accent_soft"], c["pressed"])
+        flat_button(
+            "Accent.TButton", (14, 10), accent, c["accent_text"], c["accent_hover"],
+            c["accent_pressed"], font=(UI_FONT, 11, "bold"),
+        )
+        flat_button("Seg.TButton", (10, 4), c["header"], c["muted"], c["accent_soft"], c["pressed"],
+                    font=(UI_FONT, 9), border_color=border)
+        flat_button("SegOn.TButton", (10, 4), accent, c["accent_text"], c["accent_hover"],
+                    c["accent_pressed"], font=(UI_FONT, 9, "bold"))
         style.configure(
-            "Accent.TButton",
-            padding=(12, 9),
-            background=accent,
-            foreground="#ffffff",
-            bordercolor=accent,
-            lightcolor=accent,
-            darkcolor=accent,
-            font=(UI_FONT, 11, "bold"),
+            "Header.TMenubutton", background=c["header"], foreground=c["text"], padding=(9, 5), width=0,
+            bordercolor=c["header"], lightcolor=c["header"], darkcolor=c["header"],
+            arrowsize=0, relief="flat", font=(UI_FONT, 10),
         )
         style.map(
-            "Accent.TButton",
-            background=[("disabled", "#a9c3ea"), ("pressed", COLORS["accent_pressed"]),
-                        ("active", COLORS["accent_hover"])],
-            lightcolor=[("disabled", "#a9c3ea"), ("pressed", COLORS["accent_pressed"]),
-                        ("active", COLORS["accent_hover"])],
-            darkcolor=[("disabled", "#a9c3ea"), ("pressed", COLORS["accent_pressed"]),
-                       ("active", COLORS["accent_hover"])],
-            bordercolor=[("disabled", "#a9c3ea")],
-            foreground=[("disabled", "#f3f7fd")],
+            "Header.TMenubutton",
+            background=[("pressed", c["pressed"]), ("active", c["accent_soft"])],
+            foreground=[("active", accent)],
         )
+        style.layout("Header.TMenubutton", [
+            ("Menubutton.border", {"sticky": "nswe", "children": [
+                ("Menubutton.padding", {"sticky": "nswe", "children": [
+                    ("Menubutton.label", {"sticky": ""}),
+                ]}),
+            ]}),
+        ])
         for name in ("TEntry", "TCombobox", "TSpinbox"):
             style.configure(
-                name, fieldbackground="#ffffff", bordercolor=border, lightcolor=border,
-                darkcolor=border, padding=4, arrowsize=13,
+                name, fieldbackground=c["field"], foreground=c["text"], background=soft,
+                bordercolor=border, lightcolor=c["field"], darkcolor=c["field"], padding=4,
+                arrowsize=13, arrowcolor=c["muted"], insertcolor=c["text"],
             )
-            style.map(name, bordercolor=[("focus", accent)], lightcolor=[("focus", accent)])
-        style.map("TCombobox", fieldbackground=[("readonly", "#ffffff")])
+            style.map(
+                name,
+                bordercolor=[("focus", accent)],
+                lightcolor=[("focus", c["field"])],
+                fieldbackground=[("readonly", c["field"]), ("disabled", soft)],
+                foreground=[("disabled", c["muted"]), ("readonly", c["text"])],
+                background=[("active", c["accent_soft"])],
+                arrowcolor=[("active", accent)],
+                selectbackground=[("readonly", c["field"])],
+                selectforeground=[("readonly", c["text"])],
+            )
         style.configure("TNotebook", background=panel, borderwidth=0, tabmargins=(0, 0, 0, 0))
         style.configure(
-            "TNotebook.Tab", padding=(16, 7), background=COLORS["soft"], bordercolor=border,
-            lightcolor=COLORS["soft"], font=(UI_FONT, 10),
+            "TNotebook.Tab", padding=(16, 7), background=panel, foreground=c["muted"],
+            bordercolor=panel, lightcolor=panel, darkcolor=panel, font=(UI_FONT, 10, "bold"),
         )
         style.map(
             "TNotebook.Tab",
-            background=[("selected", panel)],
-            lightcolor=[("selected", panel)],
-            foreground=[("selected", accent)],
+            background=[("selected", c["accent_soft"]), ("active", soft)],
+            lightcolor=[("selected", c["accent_soft"])],
+            bordercolor=[("selected", accent)],
+            foreground=[("selected", accent), ("active", c["text"])],
         )
-        style.configure("TCheckbutton", background=panel)
-        style.configure("TRadiobutton", background=panel)
-        style.configure("Horizontal.TScale", background=panel, troughcolor=COLORS["soft"])
+        for name in ("TCheckbutton", "TRadiobutton"):
+            style.configure(
+                name, background=panel, foreground=c["text"], indicatorbackground=c["field"],
+                indicatorforeground=accent, indicatormargin=(0, 0, 6, 0), focusthickness=0,
+            )
+            style.map(
+                name,
+                background=[("active", panel)],
+                indicatorbackground=[("selected", c["field"]), ("active", c["accent_soft"])],
+                indicatorforeground=[("selected", accent)],
+            )
+        style.configure(
+            "Horizontal.TScale", background=accent, troughcolor=soft, bordercolor=border,
+            lightcolor=accent, darkcolor=accent,
+        )
+        for name in ("Horizontal.TScrollbar", "Vertical.TScrollbar"):
+            style.configure(
+                name, background=soft, troughcolor=c["workspace"], bordercolor=c["workspace"],
+                lightcolor=soft, darkcolor=soft, arrowcolor=c["muted"], gripcount=0,
+            )
+            style.map(name, background=[("active", c["accent_soft"])])
+        # Випадні списки комбобоксів.
+        for option, value in (
+            ("*TCombobox*Listbox.background", c["field"]),
+            ("*TCombobox*Listbox.foreground", c["text"]),
+            ("*TCombobox*Listbox.selectBackground", accent),
+            ("*TCombobox*Listbox.selectForeground", c["accent_text"]),
+        ):
+            self.option_add(option, value)
+
+    def _themed(self, widget, **mapping):
+        """Запам'ятати звичайний tk-віджет, щоб перефарбовувати його при зміні теми."""
+        self.theme_widgets.append((widget, mapping))
+        self._paint_widget(widget, mapping)
+        return widget
+
+    @staticmethod
+    def _paint_widget(widget, mapping):
+        options = {}
+        for option, key in mapping.items():
+            options[option] = COLORS[key] if isinstance(key, str) and key in COLORS else key
+        widget.configure(**options)
+
+    def _line(self, parent, orient="horizontal", **pack):
+        if orient == "horizontal":
+            line = tk.Frame(parent, height=1)
+        else:
+            line = tk.Frame(parent, width=1)
+        self._themed(line, bg="border")
+        line.pack(**pack)
+        return line
+
+    def _logo_photo(self, size):
+        return ImageTk.PhotoImage(render_logo(size, COLORS["logo_gear"], COLORS["logo_bolt"]))
+
+    def _refresh_logos(self):
+        self.logo_photos = {}
+        for label, size in self.logo_labels:
+            try:
+                photo = self.logo_photos.get(size) or self._logo_photo(size)
+                self.logo_photos[size] = photo
+                label.configure(image=photo)
+            except tk.TclError:
+                pass
+
+    def _apply_window_icon(self):
+        try:
+            self.icon_photos = [
+                ImageTk.PhotoImage(render_app_icon(size)) for size in (16, 32, 48, 64)
+            ]
+            self.iconphoto(True, *self.icon_photos)
+        except Exception:
+            pass
+
+    def _apply_title_bar_theme(self):
+        """Windows 10/11: темний заголовок вікна для темних тем."""
+        if os.name != "nt":
+            return
+        try:
+            self.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            dark = ctypes.c_int(1 if COLORS["dark"] else 0)
+            for attribute in (20, 19):  # DWMWA_USE_IMMERSIVE_DARK_MODE (нові / старі збірки)
+                if ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, attribute, ctypes.byref(dark), ctypes.sizeof(dark)
+                ) == 0:
+                    break
+            color = COLORS["header"].lstrip("#")
+            colorref = ctypes.c_int(int(color[4:6] + color[2:4] + color[0:2], 16))
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(  # DWMWA_CAPTION_COLOR (Windows 11)
+                hwnd, 35, ctypes.byref(colorref), ctypes.sizeof(colorref)
+            )
+        except Exception:
+            pass
+
+    def _set_theme(self, name, save=True):
+        if name not in THEMES:
+            name = DEFAULT_THEME
+        self.theme_name = name
+        COLORS.clear()
+        COLORS.update(THEMES[name])
+        self._setup_style()
+        alive = []
+        for widget, mapping in self.theme_widgets:
+            try:
+                self._paint_widget(widget, mapping)
+                alive.append((widget, mapping))
+            except tk.TclError:
+                pass
+        self.theme_widgets = alive
+        for combo in self.comboboxes:
+            try:
+                popdown = self.tk.call("ttk::combobox::PopdownWindow", combo)
+                self.tk.call(
+                    f"{popdown}.f.l", "configure", "-background", COLORS["field"],
+                    "-foreground", COLORS["text"], "-selectbackground", COLORS["accent"],
+                    "-selectforeground", COLORS["accent_text"],
+                )
+            except tk.TclError:
+                pass
+        for key, button in self.theme_buttons.items():
+            button.configure(style="SegOn.TButton" if key == name else "Seg.TButton")
+        if hasattr(self, "theme_var"):
+            self.theme_var.set(name)
+        self._refresh_logos()
+        self._apply_title_bar_theme()
+        state, text = getattr(self, "connection_state", ("checking", "Перевірка підключення…"))
+        self._set_connection_status(state, text)
+        self._center_canvas()
+        self._render_all()
+        if save:
+            self._save_size_presets()
+            self.status_var.set(f"Тема: {THEMES[name]['title']}")
+
+    def _cycle_theme(self):
+        names = list(THEMES)
+        self._set_theme(names[(names.index(self.theme_name) + 1) % len(names)])
 
     def _toolbar_group(self, parent, caption, separator=True, side="left"):
         outer = ttk.Frame(parent)
         outer.pack(side=side, fill="y")
         buttons = ttk.Frame(outer)
         buttons.pack(side="top")
-        ttk.Label(outer, text=caption, style="Caption.TLabel").pack(side="top", pady=(3, 0))
+        ttk.Label(outer, text=caption.upper(), style="Caption.TLabel").pack(side="top", pady=(4, 0))
         if separator:
-            ttk.Separator(parent, orient="vertical").pack(side=side, fill="y", padx=8)
+            ttk.Separator(parent, orient="vertical").pack(side=side, fill="y", padx=10)
         return buttons
 
     @staticmethod
     def _tool_button(parent, text, command, tip=None, style="Tool.TButton", side="left"):
         button = ttk.Button(parent, text=text, command=command, style=style)
-        button.pack(side=side, padx=1)
+        button.pack(side=side, padx=2)
         if tip:
             ToolTip(button, tip)
         return button
 
-    def _build_menu(self):
-        menubar = tk.Menu(self)
-        file_menu = tk.Menu(menubar, tearoff=False)
+    def _new_menu(self, parent):
+        menu = tk.Menu(parent, tearoff=False, relief="flat", borderwidth=1)
+        self._themed(
+            menu, bg="panel", fg="text", activebackground="accent", activeforeground="accent_text",
+            selectcolor="accent",
+        )
+        return menu
+
+    def _build_header(self):
+        """Верхня смуга: логотип, назва, меню і перемикач теми."""
+        header = ttk.Frame(self, style="Header.TFrame", padding=(12, 6, 12, 6))
+        header.pack(side="top", fill="x")
+        logo = ttk.Label(header, style="Header.TLabel")
+        logo.pack(side="left", padx=(0, 8))
+        self.logo_labels.append((logo, 34))
+        brand = ttk.Frame(header, style="Header.TFrame")
+        brand.pack(side="left", padx=(0, 18))
+        ttk.Label(brand, text=APP_NAME, style="Brand.TLabel").pack(anchor="w")
+        ttk.Label(brand, text="РЕДАКТОР НАЛІПОК  •  XP-420B", style="BrandSub.TLabel").pack(anchor="w")
+
+        def menubutton(text):
+            button = ttk.Menubutton(header, text=text, style="Header.TMenubutton", width=0)
+            button.pack(side="left", padx=1)
+            menu = self._new_menu(button)
+            button.configure(menu=menu)
+            return menu
+
+        file_menu = menubutton("Файл")
         file_menu.add_command(label="Новий макет", accelerator="Ctrl+N", command=self._new_layout)
         file_menu.add_command(label="Відкрити…", accelerator="Ctrl+O", command=self._load_layout)
         file_menu.add_command(label="Зберегти", accelerator="Ctrl+S", command=self._save_layout)
         file_menu.add_command(label="Зберегти як…", accelerator="Ctrl+Shift+S", command=self._save_layout_as)
         file_menu.add_separator()
         file_menu.add_command(label="Вихід", command=self._on_close)
-        menubar.add_cascade(label="Файл", menu=file_menu)
 
-        edit_menu = tk.Menu(menubar, tearoff=False)
+        edit_menu = menubutton("Правка")
         edit_menu.add_command(label="Скасувати", accelerator="Ctrl+Z", command=self._undo)
         edit_menu.add_command(label="Повторити", accelerator="Ctrl+Y", command=self._redo)
         edit_menu.add_separator()
@@ -359,20 +790,16 @@ class LabelDesigner(tk.Tk):
         edit_menu.add_separator()
         edit_menu.add_command(label="Заблокувати / розблокувати елемент", command=self._toggle_selected_lock)
         edit_menu.add_command(label="Заблокувати / розблокувати макет", command=self._toggle_layout_lock)
-        menubar.add_cascade(label="Правка", menu=edit_menu)
 
-        insert_menu = tk.Menu(menubar, tearoff=False)
+        insert_menu = menubutton("Вставка")
         insert_menu.add_command(label="Текст", command=self._add_text)
         insert_menu.add_command(label="Зображення з файлу…", command=self._add_image)
         insert_menu.add_command(label="QR-код…", command=self._add_qr)
         insert_menu.add_command(label="Штрихкод Code 128…", command=self._add_barcode)
         insert_menu.add_separator()
-        insert_menu.add_command(
-            label="З буфера обміну", accelerator="Ctrl+V", command=self._paste_element
-        )
-        menubar.add_cascade(label="Вставка", menu=insert_menu)
+        insert_menu.add_command(label="З буфера обміну", accelerator="Ctrl+V", command=self._paste_element)
 
-        image_menu = tk.Menu(menubar, tearoff=False)
+        image_menu = menubutton("Зображення")
         image_menu.add_command(
             label="Повернути за годинниковою ⟳ 90°", accelerator="Ctrl+R",
             command=lambda: self._rotate_selected(90),
@@ -387,9 +814,8 @@ class LabelDesigner(tk.Tk):
         image_menu.add_command(label="Віддзеркалити по висоті ⇅", command=lambda: self._flip_selected("v"))
         image_menu.add_separator()
         image_menu.add_command(label="Скинути поворот і віддзеркалення", command=self._reset_image_transform)
-        menubar.add_cascade(label="Зображення", menu=image_menu)
 
-        view_menu = tk.Menu(menubar, tearoff=False)
+        view_menu = menubutton("Вигляд")
         view_menu.add_checkbutton(label="Сітка", variable=self.show_grid_var, command=self._render_all)
         view_menu.add_checkbutton(label="Прив’язка", variable=self.snap_var)
         view_menu.add_checkbutton(
@@ -400,14 +826,41 @@ class LabelDesigner(tk.Tk):
             view_menu.add_radiobutton(
                 label=f"Масштаб {level}", value=level, variable=self.zoom_var, command=self._set_zoom
             )
-        menubar.add_cascade(label="Вигляд", menu=view_menu)
+        view_menu.add_separator()
+        for key, theme in THEMES.items():
+            view_menu.add_radiobutton(
+                label=f"Тема: {theme['title']}", value=key, variable=self.theme_var,
+                command=lambda k=key: self._set_theme(k),
+            )
 
-        label_menu = tk.Menu(menubar, tearoff=False)
+        label_menu = menubutton("Наліпка")
         label_menu.add_command(label="Пресети розміру…", command=self._open_size_presets_dialog)
-        menubar.add_cascade(label="Наліпка", menu=label_menu)
-        self.config(menu=menubar)
+
+        # Перемикач теми справа.
+        switch = ttk.Frame(header, style="Header.TFrame")
+        switch.pack(side="right")
+        ttk.Label(switch, text="ТЕМА", style="BrandSub.TLabel").pack(side="left", padx=(0, 6))
+        for key, icon in (("light", "☀"), ("purple", "◆"), ("black", "●")):
+            button = ttk.Button(
+                switch, text=f"{icon} {THEMES[key]['title']}", style="Seg.TButton",
+                command=lambda k=key: self._set_theme(k),
+            )
+            button.pack(side="left", padx=1)
+            ToolTip(button, f"Увімкнути тему «{THEMES[key]['title']}»")
+            self.theme_buttons[key] = button
+        # Неонова лінія-акцент під шапкою.
+        accent_line = tk.Frame(self, height=2)
+        self._themed(accent_line, bg="accent")
+        accent_line.pack(side="top", fill="x")
 
     def _build_ui(self):
+        self.theme_widgets = []
+        self.comboboxes = []
+        self.theme_buttons = {}
+        self.logo_labels = []
+        self.logo_photos = {}
+        self.connection_state = ("checking", "Перевірка підключення…")
+        self.theme_var = tk.StringVar(value=self.theme_name)
         self._setup_style()
         self.show_grid_var = tk.BooleanVar(value=True)
         self.snap_var = tk.BooleanVar(value=True)
@@ -416,15 +869,15 @@ class LabelDesigner(tk.Tk):
         self.size_preset_var = tk.StringVar()
         self.size_status_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Готово")
-        self._build_menu()
+        self._build_header()
 
         # Рядок стану пакуємо першим, щоб він завжди лишався видимим унизу вікна.
         statusbar = ttk.Frame(self, style="Status.TFrame", padding=(10, 4))
         statusbar.pack(side="bottom", fill="x")
         self.status_conn_label = tk.Label(
-            statusbar, text="● Перевірка принтера…", fg=COLORS["checking"],
-            bg=COLORS["status"], font=(UI_FONT, 9),
+            statusbar, text="● Перевірка принтера…", font=(UI_FONT, 9, "bold"),
         )
+        self._themed(self.status_conn_label, bg="status", fg="checking")
         self.status_conn_label.pack(side="right", padx=(14, 0))
         ttk.Label(statusbar, textvariable=self.size_status_var, style="Status.TLabel").pack(
             side="right", padx=(14, 0)
@@ -442,6 +895,7 @@ class LabelDesigner(tk.Tk):
         )
         self.size_combo.pack(side="left", padx=(0, 4), ipady=1)
         self.size_combo.bind("<<ComboboxSelected>>", self._size_preset_selected)
+        self.comboboxes.append(self.size_combo)
         self._tool_button(
             size_group, "⚙", self._open_size_presets_dialog,
             "Додати, змінити або видалити власні розміри наліпок",
@@ -469,7 +923,7 @@ class LabelDesigner(tk.Tk):
         self._tool_button(group, "Дублювати", self._duplicate_selected, "Дублювати елемент (Ctrl+D)")
         self._tool_button(group, "Видалити", self._delete_selected, "Видалити елемент (Delete)")
 
-        tk.Frame(self, bg=COLORS["border"], height=1).pack(fill="x")
+        self._line(self, fill="x")
 
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True)
@@ -478,7 +932,7 @@ class LabelDesigner(tk.Tk):
         side = ttk.Frame(body, width=392, padding=(12, 10, 12, 10))
         side.pack(side="right", fill="y")
         side.pack_propagate(False)
-        tk.Frame(body, bg=COLORS["border"], width=1).pack(side="right", fill="y")
+        self._line(body, orient="vertical", side="right", fill="y")
 
         # ---- Робоча область --------------------------------------------------------------
         workspace = ttk.Frame(body)
@@ -491,7 +945,10 @@ class LabelDesigner(tk.Tk):
             viewbar, textvariable=self.zoom_var, values=ZOOM_LEVELS, state="readonly", width=6
         )
         zoom_combo.pack(side="left")
-        zoom_combo.bind("<<ComboboxSelected>>", self._set_zoom)
+        zoom_combo.bind(
+            "<<ComboboxSelected>>", lambda event: (self._set_zoom(event), self.canvas.focus_set())
+        )
+        self.comboboxes.append(zoom_combo)
         ToolTip(zoom_combo, "Масштаб перегляду (Ctrl + коліщатко миші)")
         ttk.Separator(viewbar, orient="vertical").pack(side="left", fill="y", padx=10)
         ttk.Checkbutton(
@@ -505,22 +962,24 @@ class LabelDesigner(tk.Tk):
             viewbar, "🔒 Макет", self._toggle_layout_lock,
             "Заблокувати / розблокувати всі елементи макета", side="right",
         )
-        tk.Frame(workspace, bg=COLORS["border"], height=1).pack(fill="x")
+        self._line(workspace, fill="x")
 
         ttk.Label(
             workspace,
-            text=("Тягніть мишкою  •  сині маркери — розмір (Shift — пропорції)  •  "
+            text=("Тягніть мишкою  •  квадратні маркери — розмір (Shift — пропорції)  •  "
                   "↻ — поворот  •  Ctrl+V — вставити текст/картинку"),
             style="Hint.TLabel",
             padding=(10, 5),
         ).pack(side="bottom", fill="x")
-        tk.Frame(workspace, bg=COLORS["border"], height=1).pack(side="bottom", fill="x")
+        self._line(workspace, side="bottom", fill="x")
 
-        canvas_holder = tk.Frame(workspace, bg=COLORS["workspace"])
+        canvas_holder = self._themed(tk.Frame(workspace), bg="workspace")
         canvas_holder.pack(fill="both", expand=True)
         canvas_holder.rowconfigure(0, weight=1)
         canvas_holder.columnconfigure(0, weight=1)
-        self.canvas_view = tk.Canvas(canvas_holder, bg=COLORS["workspace"], highlightthickness=0)
+        self.canvas_view = self._themed(
+            tk.Canvas(canvas_holder, highlightthickness=0), bg="workspace"
+        )
         canvas_x_scroll = ttk.Scrollbar(canvas_holder, orient="horizontal", command=self.canvas_view.xview)
         canvas_y_scroll = ttk.Scrollbar(canvas_holder, orient="vertical", command=self.canvas_view.yview)
         self.canvas_view.configure(xscrollcommand=canvas_x_scroll.set, yscrollcommand=canvas_y_scroll.set)
@@ -533,10 +992,11 @@ class LabelDesigner(tk.Tk):
             height=round(LABEL_HEIGHT_MM * PX_PER_MM),
             bg="white",
             highlightthickness=1,
-            highlightbackground="#8a94a3",
         )
+        self._themed(self.canvas, highlightbackground="border")
         self.canvas_window = self.canvas_view.create_window(32, 32, window=self.canvas, anchor="nw")
         self.canvas_view.bind("<Configure>", self._center_canvas)
+        self.canvas_view.bind("<Button-1>", lambda _event: self.canvas.focus_set())
         self.canvas.bind("<Button-1>", self._canvas_click)
         self.canvas.bind("<Double-Button-1>", self._canvas_double_click)
         self.canvas.bind("<B1-Motion>", self._canvas_drag)
@@ -564,15 +1024,21 @@ class LabelDesigner(tk.Tk):
         ttk.Label(props_tab, textvariable=self.type_var, style="Title.TLabel").grid(
             row=0, column=0, sticky="w", pady=(0, 8)
         )
-        self.empty_hint = ttk.Label(
-            props_tab,
-            text=("Виберіть елемент на полотні\nабо додайте новий кнопками «Додати».\n\n"
-                  "Порада: скопіюйте текст чи картинку в будь-якій програмі\n"
-                  "і натисніть тут Ctrl+V."),
+        self.empty_hint = ttk.Frame(props_tab)
+        self.empty_hint.grid(row=1, column=0, sticky="nsew", pady=(24, 0))
+        empty_logo = ttk.Label(self.empty_hint)
+        empty_logo.pack(pady=(0, 14))
+        self.logo_labels.append((empty_logo, 96))
+        ttk.Label(
+            self.empty_hint, text="Почніть створювати наліпку", style="Title.TLabel"
+        ).pack()
+        ttk.Label(
+            self.empty_hint,
+            text=("Додайте текст, картинку, QR чи штрихкод\nкнопками «Додати» вгорі.\n\n"
+                  "Або просто скопіюйте текст чи картинку\nв будь-якій програмі й натисніть Ctrl+V."),
             style="Hint.TLabel",
-            justify="left",
-        )
-        self.empty_hint.grid(row=1, column=0, sticky="nw", pady=(6, 0))
+            justify="center",
+        ).pack(pady=(6, 0))
         self.element_panel = ttk.Frame(props_tab)
         self.element_panel.grid(row=2, column=0, sticky="nsew")
         self.element_panel.columnconfigure(0, weight=1)
@@ -595,12 +1061,14 @@ class LabelDesigner(tk.Tk):
         ttk.Entry(self.text_frame, textvariable=self.text_var).grid(row=0, column=1, sticky="ew")
         ttk.Label(self.text_frame, text="Шрифт").grid(row=1, column=0, sticky="w", pady=3)
         self.font_var = tk.StringVar(value="Tahoma")
-        ttk.Combobox(
+        font_combo = ttk.Combobox(
             self.text_frame,
             textvariable=self.font_var,
             values=("Tahoma", "Arial", "Segoe UI", "Calibri", "Times New Roman"),
             state="normal",
-        ).grid(row=1, column=1, sticky="ew")
+        )
+        font_combo.grid(row=1, column=1, sticky="ew")
+        self.comboboxes.append(font_combo)
         ttk.Label(self.text_frame, text="Кегль, pt").grid(row=2, column=0, sticky="w", pady=3, padx=(0, 8))
         self.size_var = tk.StringVar(value="12")
         ttk.Spinbox(
@@ -718,12 +1186,12 @@ class LabelDesigner(tk.Tk):
             relief="flat",
             borderwidth=0,
             highlightthickness=1,
-            highlightbackground=COLORS["border"],
-            highlightcolor=COLORS["accent"],
-            selectbackground=COLORS["accent"],
-            selectforeground="#ffffff",
             activestyle="none",
             font=(UI_FONT, 10),
+        )
+        self._themed(
+            self.layers_list, bg="field", fg="text", highlightbackground="border",
+            highlightcolor="accent", selectbackground="accent", selectforeground="accent_text",
         )
         self.layers_list.pack(fill="both", expand=True)
         self.layers_list.bind("<<ListboxSelect>>", self._layer_selected)
@@ -776,6 +1244,7 @@ class LabelDesigner(tk.Tk):
         )
         self.printer_combo.grid(row=3, column=0, columnspan=2, sticky="ew")
         self.printer_combo.bind("<<ComboboxSelected>>", lambda _event: self._schedule_connection_check())
+        self.comboboxes.append(self.printer_combo)
 
         setup_buttons = ttk.Frame(printing)
         setup_buttons.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 4))
@@ -800,13 +1269,12 @@ class LabelDesigner(tk.Tk):
         self.connection_status_label = tk.Label(
             printing,
             text="● Перевірка підключення…",
-            fg=COLORS["checking"],
-            bg=COLORS["panel"],
             anchor="w",
             justify="left",
             wraplength=320,
             font=(UI_FONT, 10),
         )
+        self._themed(self.connection_status_label, bg="panel", fg="checking")
         self.connection_status_label.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         printing.columnconfigure(0, weight=1)
         printing.columnconfigure(1, weight=1)
@@ -858,18 +1326,10 @@ class LabelDesigner(tk.Tk):
         self.network_ip_entry.configure(state="disabled")
         self._show_property_frame(None)
 
-        self.bind("<Control-z>", self._undo)
-        self.bind("<Control-y>", self._redo)
-        self.bind("<Control-c>", self._copy_selected)
-        self.bind("<Control-v>", self._paste_element)
-        self.bind("<Control-d>", self._duplicate_selected)
+        # Усі Ctrl-комбінації йдуть через один обробник, який працює в будь-якій
+        # розкладці клавіатури (зокрема українській).
+        self.bind_all("<Control-KeyPress>", self._control_key)
         self.bind("<Delete>", self._delete_shortcut)
-        self.bind("<Control-n>", lambda _event: self._new_layout() or "break")
-        self.bind("<Control-o>", lambda _event: self._load_layout() or "break")
-        self.bind("<Control-s>", lambda _event: self._save_layout() or "break")
-        self.bind("<Control-S>", lambda _event: self._save_layout_as() or "break")
-        self.bind("<Control-r>", lambda event: self._rotate_selected(90, event))
-        self.bind("<Control-R>", lambda event: self._rotate_selected(-90, event))
         for key in ("<Left>", "<Right>", "<Up>", "<Down>"):
             self.bind(key, self._nudge_selected)
 
@@ -988,11 +1448,65 @@ class LabelDesigner(tk.Tk):
         self.destroy()
 
     @staticmethod
-    def _event_in_text_input(event):
+    def _is_editable_input(widget):
+        """Поле, куди користувач зараз вводить текст (не «лише для читання»)."""
+        if not isinstance(widget, (tk.Entry, ttk.Entry, tk.Text)):
+            return False
+        try:
+            return str(widget.cget("state")) not in ("readonly", "disabled")
+        except tk.TclError:
+            return True
+
+    def _event_in_text_input(self, event):
         if event is None:
             return False
         widget = getattr(event, "widget", None)
-        return isinstance(widget, (tk.Entry, ttk.Entry, ttk.Combobox, ttk.Spinbox, tk.Listbox))
+        return isinstance(widget, tk.Listbox) or self._is_editable_input(widget)
+
+    def _control_key(self, event):
+        """Ctrl-комбінації незалежно від розкладки (англійська, українська, російська)."""
+        keysym = str(event.keysym)
+        latin = len(keysym) == 1 and keysym.isascii() and keysym.isalpha()
+        letter = keysym.lower() if latin else None
+        if letter is None:
+            codes = CTRL_KEY_VK if os.name == "nt" else CTRL_KEY_X11
+            letter = codes.get(event.keycode)
+        if letter is None:
+            letter = CTRL_KEY_CYRILLIC.get(keysym)
+        if letter is None:
+            return None
+        widget = event.widget
+        if self._is_editable_input(widget):
+            if not latin and letter in ("a", "c", "v", "x"):
+                # У не латинській розкладці стандартні Ctrl+C/V/X полів Tk не спрацьовують.
+                widget.event_generate(
+                    {"a": "<<SelectAll>>", "c": "<<Copy>>", "v": "<<Paste>>", "x": "<<Cut>>"}[letter]
+                )
+                return "break"
+            if letter in ("a", "c", "v", "x", "z", "y"):
+                return None
+        try:
+            if widget.winfo_toplevel() is not self:
+                return None
+        except (AttributeError, tk.TclError):
+            return None
+        shift = bool(event.state & 0x0001)
+        actions = {
+            "z": self._undo,
+            "y": self._redo,
+            "c": self._copy_selected,
+            "v": self._paste_element,
+            "d": self._duplicate_selected,
+            "n": self._new_layout,
+            "o": self._load_layout,
+            "s": self._save_layout_as if shift else self._save_layout,
+            "r": (lambda: self._rotate_selected(-90)) if shift else (lambda: self._rotate_selected(90)),
+        }
+        action = actions.get(letter)
+        if action is None:
+            return None
+        action()
+        return "break"
 
     def _copy_selected(self, event=None):
         if self._event_in_text_input(event):
@@ -1231,21 +1745,32 @@ class LabelDesigner(tk.Tk):
         y = max(pad, (view_height - label_height - 24) / 2)
         self.canvas_view.coords(self.canvas_window, x, y)
         self.canvas_view.delete("decor")
-        self.canvas_view.create_rectangle(
-            x + 3, y + 4, x + label_width + 4, y + label_height + 5,
-            fill=COLORS["shadow"], outline="", tags="decor",
-        )
+        glow = COLORS.get("glow") or ()
+        if glow:
+            # Неонове сяйво навколо наліпки в темних темах.
+            steps = len(glow)
+            for index, color in enumerate(glow):
+                spread = (steps - index) * 4
+                self.canvas_view.create_rectangle(
+                    x - spread, y - spread, x + label_width + spread, y + label_height + spread,
+                    fill=color, outline="", tags="decor",
+                )
+        else:
+            self.canvas_view.create_rectangle(
+                x + 3, y + 4, x + label_width + 4, y + label_height + 5,
+                fill=COLORS["shadow"], outline="", tags="decor",
+            )
         self.canvas_view.create_text(
-            x + label_width / 2, y + label_height + 18,
+            x + label_width / 2, y + label_height + 18 + (len(glow) * 4 if glow else 0),
             text=size_text(LABEL_WIDTH_MM, LABEL_HEIGHT_MM),
-            fill="#4a5563", font=(UI_FONT, 9), tags="decor",
+            fill=COLORS["muted"], font=(UI_FONT, 9, "bold"), tags="decor",
         )
         self.canvas_view.configure(
             scrollregion=(
                 0,
                 0,
                 max(view_width, x + label_width + pad),
-                max(view_height, y + label_height + pad + 24),
+                max(view_height, y + label_height + pad + 40),
             )
         )
 
@@ -1700,7 +2225,7 @@ class LabelDesigner(tk.Tk):
         if bbox:
             element = self._element()
             locked = bool(element and element.get("locked"))
-            outline = "#d97706" if locked else "#1976d2"
+            outline = "#d97706" if locked else COLORS["selection"]
             self.canvas.create_rectangle(
                 bbox[0] - 3, bbox[1] - 3, bbox[2] + 3, bbox[3] + 3,
                 outline=outline, width=2, dash=(4, 2), tags="selection"
@@ -1727,7 +2252,7 @@ class LabelDesigner(tk.Tk):
             for direction, (x, y) in handles.items():
                 self.canvas.create_rectangle(
                     x - radius, y - radius, x + radius, y + radius,
-                    fill="#ffffff", outline="#1976d2", width=2,
+                    fill="#ffffff", outline=COLORS["selection"], width=2,
                     tags=("selection", "resize_handle", f"resize_{direction}"),
                 )
             if element and element.get("type") == "image":
@@ -1740,14 +2265,14 @@ class LabelDesigner(tk.Tk):
                 else:
                     anchor_y, handle_y = top, top + 22
                 self.canvas.create_line(
-                    middle_x, anchor_y, middle_x, handle_y, fill="#1976d2", width=1,
+                    middle_x, anchor_y, middle_x, handle_y, fill=COLORS["selection"], width=1,
                     tags="selection",
                 )
                 rotate_radius = 8
                 self.canvas.create_oval(
                     middle_x - rotate_radius, handle_y - rotate_radius,
                     middle_x + rotate_radius, handle_y + rotate_radius,
-                    fill="#1976d2", outline="#ffffff", width=2,
+                    fill=COLORS["selection"], outline="#ffffff", width=2,
                     tags=("selection", "rotate_handle"),
                 )
                 self.canvas.create_text(
@@ -1756,6 +2281,8 @@ class LabelDesigner(tk.Tk):
                 )
 
     def _canvas_click(self, event):
+        # Фокус на полотно: тоді Ctrl+V/Ctrl+C діють на наліпку, а не на поле вводу.
+        self.canvas.focus_set()
         if self.inline_editor:
             # Натискання поза вбудованим полем завершує редагування так само,
             # як Enter або втрата фокуса. Після цього звичайно обробляємо клік:
@@ -1964,8 +2491,8 @@ class LabelDesigner(tk.Tk):
             relief="solid",
             borderwidth=1,
             highlightthickness=2,
-            highlightcolor="#1976d2",
-            highlightbackground="#1976d2",
+            highlightcolor=COLORS["selection"],
+            highlightbackground=COLORS["selection"],
         )
         editor.insert(0, element.get("text", ""))
         editor.place(
@@ -2563,6 +3090,8 @@ class LabelDesigner(tk.Tk):
                 continue
             if name:
                 self.custom_presets.append({"name": name, "width": width, "height": height})
+        if data.get("theme") in THEMES:
+            self.theme_name = data["theme"]
         saved = data.get("last") or {}
         try:
             last = self._validate_label_size(saved["width"], saved["height"])
@@ -2574,6 +3103,7 @@ class LabelDesigner(tk.Tk):
         payload = {
             "custom": self.custom_presets,
             "last": {"width": LABEL_WIDTH_MM, "height": LABEL_HEIGHT_MM},
+            "theme": getattr(self, "theme_name", DEFAULT_THEME),
         }
         try:
             self.presets_path.write_text(
@@ -2663,6 +3193,7 @@ class LabelDesigner(tk.Tk):
         self.active_preset_display = self.size_preset_var.get()
         self._apply_label_size(entry["width"], entry["height"])
         self.size_combo.selection_clear()
+        self.canvas.focus_set()
 
     def _open_size_presets_dialog(self):
         if self.presets_dialog and self.presets_dialog.winfo_exists():
@@ -2672,7 +3203,7 @@ class LabelDesigner(tk.Tk):
         dialog = tk.Toplevel(self)
         self.presets_dialog = dialog
         dialog.title("Пресети розміру наліпок")
-        dialog.configure(bg=COLORS["panel"])
+        self._themed(dialog, bg="panel")
         dialog.transient(self)
         dialog.resizable(False, False)
 
@@ -2689,12 +3220,12 @@ class LabelDesigner(tk.Tk):
             relief="flat",
             borderwidth=0,
             highlightthickness=1,
-            highlightbackground=COLORS["border"],
-            highlightcolor=COLORS["accent"],
-            selectbackground=COLORS["accent"],
-            selectforeground="#ffffff",
             activestyle="none",
             font=(UI_FONT, 10),
+        )
+        self._themed(
+            listbox, bg="field", fg="text", highlightbackground="border",
+            highlightcolor="accent", selectbackground="accent", selectforeground="accent_text",
         )
         listbox.grid(row=1, column=0, rowspan=2, sticky="nsew")
 
@@ -3059,12 +3590,8 @@ $items = @(
             self._schedule_connection_check()
 
     def _set_connection_status(self, state, text):
-        colors = {
-            "ok": ("#087f23", "● "),
-            "error": ("#c00000", "● "),
-            "checking": ("#9a6700", "● "),
-        }
-        color, prefix = colors[state]
+        self.connection_state = (state, text)
+        color, prefix = COLORS[state], "● "
         self.connection_status_label.configure(text=prefix + text, fg=color)
         short = {
             "ok": "Принтер підключено",
