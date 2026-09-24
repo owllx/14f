@@ -26,7 +26,7 @@ from tkinter import font as tkfont
 if os.name == "nt":
     import winreg
 
-from PIL import Image, ImageTk
+from PIL import Image, ImageChops, ImageEnhance, ImageFilter, ImageOps, ImageTk
 import barcode
 import qrcode
 from barcode.writer import ImageWriter
@@ -317,6 +317,129 @@ def render_app_icon(size, start="#7c3aed", end="#06b6d4"):
     return tile.resize((size, size), Image.Resampling.LANCZOS)
 
 
+# ---- Обробка фото ------------------------------------------------------------------------
+# XP-420B друкує з роздільністю 203 dpi ≈ 8 точок на міліметр.
+PRINTER_DOTS_PER_MM = 8
+ADJUST_DEFAULTS = {
+    "mode": "color",        # color | gray | bw | dither
+    "brightness": 0,        # -100…100
+    "contrast": 0,          # -100…100
+    "saturation": 100,      # 0…200 %
+    "black": 0,             # точка чорного 0…254
+    "white": 255,           # точка білого 1…255
+    "midtones": 0,          # -100…100 (середні тони / гамма)
+    "sharpen": 0,           # 0…300 % різкості
+    "threshold": 128,       # поріг для режиму «Чорно-білий»
+    "denoise": False,       # прибрати шум / зерно
+    "invert": False,        # негатив
+    "white_transparent": False,  # білий фон стає прозорим
+}
+ADJUST_MODES = (
+    ("color", "Колір", "Звичайне кольорове фото"),
+    ("gray", "Сірий", "Відтінки сірого (ЧБ з півтонами)"),
+    ("bw", "Ч/Б", "Лише чисто чорний і білий — для тексту, логотипів, штрихкодів"),
+    ("dither", "Точки", "Фото з точок — найкраще для термопринтера"),
+)
+PHOTO_PRESETS = (
+    ("✨ Авто", "auto", "Автоматично підібрати точки чорного й білого"),
+    ("↺ Оригінал", {}, "Скинути всі налаштування фото"),
+    ("◐ Чіткий ЧБ", {"mode": "gray", "contrast": 35, "black": 35, "white": 225, "sharpen": 120},
+     "Відтінки сірого, контрастно й різко"),
+    ("● Глибокий чорний", {"mode": "gray", "contrast": 45, "black": 95, "white": 235,
+                          "midtones": -15, "sharpen": 80},
+     "Світло-чорне стає насичено чорним"),
+    ("▣ Текст / логотип", {"mode": "bw", "threshold": 150, "black": 40, "white": 210, "sharpen": 150},
+     "Тільки чорне й біле, чіткі краї"),
+    ("░ Фото для друку", {"mode": "dither", "contrast": 20, "black": 20, "white": 235,
+                         "midtones": 10, "sharpen": 100},
+     "Фото точками — так термопринтер друкує найкраще"),
+    ("▤ Скан документа", {"mode": "bw", "threshold": 170, "white": 200, "denoise": True, "sharpen": 60},
+     "Прибрати сірий фон і шум, лишити чіткий текст"),
+    ("⌫ Прибрати фон", {"mode": "gray", "white": 215, "contrast": 20, "white_transparent": True},
+     "Світлий фон стає прозорим"),
+)
+
+
+def normalized_adjustments(adjust):
+    """Повні налаштування або None, якщо фото не змінено."""
+    if not adjust:
+        return None
+    values = dict(ADJUST_DEFAULTS)
+    values.update({key: value for key, value in adjust.items() if key in ADJUST_DEFAULTS})
+    if values == ADJUST_DEFAULTS:
+        return None
+    return values
+
+
+def apply_tone_adjustments(image, adjust):
+    """Яскравість, контраст, насиченість, рівні, різкість (RGBA → RGBA)."""
+    alpha = image.getchannel("A")
+    work = image.convert("RGB")
+    if adjust["denoise"]:
+        work = work.filter(ImageFilter.MedianFilter(3))
+    if adjust["mode"] == "color":
+        if adjust["saturation"] != 100:
+            work = ImageEnhance.Color(work).enhance(max(0.0, adjust["saturation"] / 100.0))
+    else:
+        work = work.convert("L")
+    if adjust["brightness"]:
+        work = ImageEnhance.Brightness(work).enhance(max(0.0, 1.0 + adjust["brightness"] / 100.0))
+    if adjust["contrast"]:
+        work = ImageEnhance.Contrast(work).enhance(max(0.0, 1.0 + adjust["contrast"] / 100.0))
+    black = max(0, min(254, int(adjust["black"])))
+    white = max(black + 1, min(255, int(adjust["white"])))
+    gamma = 2.0 ** (adjust["midtones"] / 50.0)
+    if black > 0 or white < 255 or adjust["midtones"]:
+        span = float(white - black)
+        table = [
+            round(255 * (min(1.0, max(0.0, (value - black) / span)) ** (1.0 / gamma)))
+            for value in range(256)
+        ]
+        work = work.point(table * len(work.getbands()))
+    if adjust["sharpen"] > 0:
+        work = work.filter(
+            ImageFilter.UnsharpMask(radius=2, percent=int(adjust["sharpen"]), threshold=2)
+        )
+    if adjust["invert"]:
+        work = ImageOps.invert(work)
+    result = work.convert("RGBA")
+    result.putalpha(alpha)
+    return result
+
+
+def apply_bit_mode(image, adjust):
+    """Режими «Ч/Б» і «Точки» (після масштабування до роздільності друку)."""
+    alpha = image.getchannel("A")
+    gray = Image.alpha_composite(Image.new("RGBA", image.size, "white"), image).convert("L")
+    if adjust["mode"] == "bw":
+        threshold = int(adjust["threshold"])
+        bits = gray.point(lambda value: 255 if value >= threshold else 0)
+    else:
+        bits = gray.convert("1").convert("L")
+    alpha = alpha.point(lambda value: 255 if value > 127 else 0)
+    return Image.merge("RGBA", (bits, bits, bits, alpha))
+
+
+def apply_white_transparent(image):
+    gray = Image.alpha_composite(Image.new("RGBA", image.size, "white"), image).convert("L")
+    keep = gray.point(lambda value: 0 if value >= 235 else 255)
+    image = image.copy()
+    image.putalpha(ImageChops.multiply(image.getchannel("A"), keep))
+    return image
+
+
+def fit_image(image, box, preserve_aspect):
+    """Вписати (або розтягнути) картинку в рамку заданого розміру в пікселях."""
+    box = (max(1, int(round(box[0]))), max(1, int(round(box[1]))))
+    if not preserve_aspect:
+        return image.resize(box, Image.Resampling.LANCZOS)
+    scale = min(box[0] / max(1, image.width), box[1] / max(1, image.height))
+    size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+    if size == image.size:
+        return image
+    return image.resize(size, Image.Resampling.LANCZOS)
+
+
 LOCAL_DRIVER_SOURCE = (
     r"C:\Windows\System32\DriverStore\FileRepository"
     r"\xprinter.inf_amd64_a2184ce9ef55d7a6"
@@ -404,6 +527,11 @@ class LabelDesigner(tk.Tk):
         self.resize_state = None
         self.rotate_state = None
         self.image_size_cache = {}
+        self.bitmap_cache = {}
+        self.histogram_cache = {}
+        self.adjust_compare = False
+        self.adjust_drag = False
+        self.adjust_render_job = None
         self.presets_dialog = None
         self.active_preset_display = None
         self.clipboard_signature = None
@@ -454,6 +582,425 @@ class LabelDesigner(tk.Tk):
         self.after(250, self._offer_autosave_recovery)
         self.connection_after_id = self.after(500, self._schedule_connection_check)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    # ---- Вкладка «Фото»: різкість, чорний, ЧБ -------------------------------------------
+
+    PHOTO_SLIDERS = (
+        ("black", "Точка чорного", 0, 254,
+         "Усе темніше за цю точку стане повністю чорним.\nТягніть праворуч — світло-чорне стане глибоко чорним."),
+        ("white", "Точка білого", 1, 255,
+         "Усе світліше за цю точку стане повністю білим.\nТягніть ліворуч — сірий фон стане білим."),
+        ("midtones", "Середні тони", -100, 100, "Ліворуч — темніше, праворуч — світліше (без зміни чорного й білого)"),
+        ("contrast", "Контраст", -100, 100, "Різниця між світлим і темним"),
+        ("brightness", "Яскравість", -100, 100, "Загальна яскравість фото"),
+        ("sharpen", "Різкість", 0, 300, "Робить розмите фото чіткішим. 80–150 — оптимально"),
+        ("saturation", "Насиченість", 0, 200, "Яскравість кольорів (лише в режимі «Колір»). 0 — сіре"),
+        ("threshold", "Поріг Ч/Б", 1, 254, "Режим «Ч/Б»: що темніше за поріг — чорне, світліше — біле"),
+    )
+
+    def _build_photo_tab(self, tab):
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(1, weight=1)
+        self.photo_title_var = tk.StringVar(value="Фото не вибрано")
+        ttk.Label(tab, textvariable=self.photo_title_var, style="Title.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 6)
+        )
+        self.photo_empty = ttk.Label(
+            tab,
+            text=("Натисніть на фото, QR-код чи штрихкод на наліпці —\n"
+                  "тут з'являться налаштування чіткості, чорного та ЧБ.\n\n"
+                  "Порада: подвійний клік по фото відкриває цю вкладку."),
+            style="Hint.TLabel",
+            justify="left",
+        )
+        self.photo_empty.grid(row=1, column=0, sticky="nw")
+
+        # Прокручувана область з усіма налаштуваннями.
+        holder = ttk.Frame(tab)
+        holder.grid(row=1, column=0, sticky="nsew")
+        holder.columnconfigure(0, weight=1)
+        holder.rowconfigure(0, weight=1)
+        self.photo_holder = holder
+        scroll_canvas = self._themed(tk.Canvas(holder, highlightthickness=0, borderwidth=0), bg="panel")
+        scrollbar = ttk.Scrollbar(holder, orient="vertical", command=scroll_canvas.yview)
+        scroll_canvas.configure(yscrollcommand=scrollbar.set)
+        scroll_canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        body = ttk.Frame(scroll_canvas)
+        window = scroll_canvas.create_window(0, 0, window=body, anchor="nw")
+        body.bind("<Configure>", lambda _e: scroll_canvas.configure(scrollregion=scroll_canvas.bbox("all")))
+        scroll_canvas.bind("<Configure>", lambda e: scroll_canvas.itemconfigure(window, width=e.width))
+
+        def wheel(event):
+            if getattr(event, "num", None) == 4 or getattr(event, "delta", 0) > 0:
+                scroll_canvas.yview_scroll(-2, "units")
+            else:
+                scroll_canvas.yview_scroll(2, "units")
+            return "break"
+
+        def bind_wheel(_event):
+            self.bind_all("<MouseWheel>", wheel)
+            self.bind_all("<Button-4>", wheel)
+            self.bind_all("<Button-5>", wheel)
+
+        def unbind_wheel(_event):
+            for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                self.unbind_all(sequence)
+
+        holder.bind("<Enter>", bind_wheel)
+        holder.bind("<Leave>", unbind_wheel)
+        body.columnconfigure(0, weight=1)
+
+        presets = ttk.LabelFrame(body, text="Швидкі пресети — один клік", padding=8)
+        presets.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        for index, (title, values, tip) in enumerate(PHOTO_PRESETS):
+            button = ttk.Button(
+                presets, text=title, style="Tool.TButton",
+                command=lambda v=values, t=title: self._apply_photo_preset(v, t),
+            )
+            button.grid(row=index // 2, column=index % 2, sticky="ew", padx=1, pady=1)
+            ToolTip(button, tip)
+        presets.columnconfigure(0, weight=1)
+        presets.columnconfigure(1, weight=1)
+
+        mode_box = ttk.LabelFrame(body, text="Режим кольору", padding=8)
+        mode_box.grid(row=1, column=0, sticky="ew", pady=(8, 0), padx=(0, 6))
+        self.mode_buttons = {}
+        for index, (key, title, tip) in enumerate(ADJUST_MODES):
+            button = ttk.Button(
+                mode_box, text=title, style="Tool.TButton",
+                command=lambda k=key: self._set_photo_adjust({"mode": k}, record=True),
+            )
+            button.grid(row=0, column=index, sticky="ew", padx=1)
+            ToolTip(button, tip)
+            mode_box.columnconfigure(index, weight=1)
+            self.mode_buttons[key] = button
+        self.mode_hint_var = tk.StringVar()
+        ttk.Label(mode_box, textvariable=self.mode_hint_var, style="Hint.TLabel", wraplength=320).grid(
+            row=1, column=0, columnspan=4, sticky="w", pady=(6, 0)
+        )
+
+        levels = ttk.LabelFrame(body, text="Рівні — тягніть трикутники ▲", padding=8)
+        levels.grid(row=2, column=0, sticky="ew", pady=(8, 0), padx=(0, 6))
+        levels.columnconfigure(0, weight=1)
+        self.histogram = self._themed(
+            tk.Canvas(levels, height=78, highlightthickness=1, borderwidth=0, cursor="sb_h_double_arrow"),
+            bg="field", highlightbackground="border",
+        )
+        self.histogram.grid(row=0, column=0, sticky="ew")
+        self.histogram.bind("<Configure>", lambda _e: self._draw_histogram())
+        self.histogram.bind("<ButtonPress-1>", self._histogram_press)
+        self.histogram.bind("<B1-Motion>", self._histogram_drag)
+        self.histogram.bind("<ButtonRelease-1>", self._histogram_release)
+        ToolTip(self.histogram, "Чорний ▲ — точка чорного, білий △ — точка білого.\nТягніть мишкою.")
+
+        sliders = ttk.LabelFrame(body, text="Налаштування", padding=8)
+        sliders.grid(row=3, column=0, sticky="ew", pady=(8, 0), padx=(0, 6))
+        sliders.columnconfigure(1, weight=1)
+        self.photo_vars = {}
+        self.photo_value_labels = {}
+        self.photo_scales = {}
+        for row, (key, title, low, high, tip) in enumerate(self.PHOTO_SLIDERS):
+            name = ttk.Label(sliders, text=title, cursor="hand2")
+            name.grid(row=row, column=0, sticky="w", pady=3, padx=(0, 8))
+            ToolTip(name, tip + "\n\nПодвійний клік — скинути.")
+            variable = tk.DoubleVar(value=ADJUST_DEFAULTS[key])
+            scale = ttk.Scale(
+                sliders, from_=low, to=high, variable=variable,
+                command=lambda value, k=key: self._photo_slider_moved(k, value),
+            )
+            scale.grid(row=row, column=1, sticky="ew", pady=3)
+            scale.bind("<ButtonPress-1>", self._photo_slider_pressed, add="+")
+            scale.bind("<ButtonRelease-1>", self._photo_slider_released, add="+")
+            value_label = ttk.Label(sliders, width=4, anchor="e", style="Hint.TLabel")
+            value_label.grid(row=row, column=2, sticky="e", padx=(6, 0))
+            for widget in (name, value_label):
+                widget.bind(
+                    "<Double-Button-1>",
+                    lambda _e, k=key: self._set_photo_adjust({k: ADJUST_DEFAULTS[k]}, record=True),
+                )
+            self.photo_vars[key] = variable
+            self.photo_value_labels[key] = value_label
+            self.photo_scales[key] = scale
+
+        options = ttk.LabelFrame(body, text="Додатково", padding=8)
+        options.grid(row=4, column=0, sticky="ew", pady=(8, 0), padx=(0, 6))
+        self.photo_flags = {}
+        for row, (key, title, tip) in enumerate((
+            ("denoise", "Прибрати шум і зерно", "Згладжує дрібне зерно перед збільшенням різкості"),
+            ("invert", "Негатив (інвертувати)", "Чорне стає білим, біле — чорним"),
+            ("white_transparent", "Білий фон — прозорий", "Світлі ділянки не перекривають інші елементи"),
+        )):
+            variable = tk.BooleanVar(value=False)
+            check = ttk.Checkbutton(
+                options, text=title, variable=variable,
+                command=lambda k=key, v=variable: self._set_photo_adjust({k: v.get()}, record=True),
+            )
+            check.grid(row=row, column=0, sticky="w", pady=1)
+            ToolTip(check, tip)
+            self.photo_flags[key] = variable
+
+        actions = ttk.Frame(body)
+        actions.grid(row=5, column=0, sticky="ew", pady=(10, 4), padx=(0, 6))
+        actions.columnconfigure(0, weight=1)
+        actions.columnconfigure(1, weight=1)
+        compare = ttk.Button(actions, text="👁 Утримуйте — оригінал", style="Tool.TButton")
+        compare.grid(row=0, column=0, sticky="ew", padx=(0, 2))
+        compare.bind("<ButtonPress-1>", lambda _e: self._photo_compare(True))
+        compare.bind("<ButtonRelease-1>", lambda _e: self._photo_compare(False))
+        ToolTip(compare, "Натисніть і тримайте, щоб порівняти з оригіналом")
+        ttk.Button(
+            actions, text="↺ Скинути все", style="Tool.TButton",
+            command=lambda: self._apply_photo_preset({}, "↺ Оригінал"),
+        ).grid(row=0, column=1, sticky="ew", padx=(2, 0))
+        ttk.Label(
+            body,
+            text=("Зміни видно одразу на наліпці й так само йдуть на друк.\n"
+                  "Оригінальний файл не змінюється. Ctrl+Z — скасувати."),
+            style="Hint.TLabel",
+            justify="left",
+        ).grid(row=6, column=0, sticky="w", pady=(4, 8))
+
+    def _open_photo_tab(self):
+        element = self._element()
+        if element and element.get("type") == "image":
+            self.notebook.select(self.photo_tab)
+            self._load_photo_controls()
+
+    def _selected_photo(self):
+        element = self._element()
+        if element and element.get("type") == "image":
+            return element
+        return None
+
+    def _load_photo_controls(self):
+        if not hasattr(self, "photo_vars"):
+            return
+        element = self._selected_photo()
+        if not element:
+            self.photo_title_var.set("Фото не вибрано")
+            self.photo_holder.grid_remove()
+            self.photo_empty.grid()
+            return
+        self.photo_empty.grid_remove()
+        self.photo_holder.grid()
+        if element.get("source_kind") == "qr":
+            self.photo_title_var.set("QR-код")
+        elif element.get("source_kind") == "code128":
+            self.photo_title_var.set("Штрихкод")
+        else:
+            self.photo_title_var.set(f"Фото: {Path(element.get('path', '')).name[:28]}")
+        values = dict(ADJUST_DEFAULTS)
+        values.update(element.get("adjust") or {})
+        self.loading_photo = True
+        try:
+            for key, variable in self.photo_vars.items():
+                if not self.adjust_drag:
+                    variable.set(values[key])
+                self.photo_value_labels[key].configure(text=f"{int(round(values[key]))}")
+            for key, variable in self.photo_flags.items():
+                variable.set(bool(values[key]))
+        finally:
+            self.loading_photo = False
+        for key, button in self.mode_buttons.items():
+            button.configure(style="SegOn.TButton" if key == values["mode"] else "Tool.TButton")
+        hints = {key: tip for key, _title, tip in ADJUST_MODES}
+        self.mode_hint_var.set(hints.get(values["mode"], ""))
+        color_mode = values["mode"] == "color"
+        bw_mode = values["mode"] == "bw"
+        self.photo_scales["saturation"].state(["!disabled"] if color_mode else ["disabled"])
+        self.photo_scales["threshold"].state(["!disabled"] if bw_mode else ["disabled"])
+        self._draw_histogram()
+
+    def _set_photo_adjust(self, changes, record=False, render=True):
+        element = self._selected_photo()
+        if not element:
+            self.status_var.set("Спочатку виберіть фото на наліпці")
+            return
+        current = dict(ADJUST_DEFAULTS)
+        current.update(element.get("adjust") or {})
+        updated = dict(current)
+        updated.update(changes)
+        if updated["black"] >= updated["white"]:
+            if "black" in changes:
+                updated["black"] = updated["white"] - 1
+            else:
+                updated["white"] = updated["black"] + 1
+        if updated == current:
+            return
+        if record:
+            self._record_history()
+        stored = {key: value for key, value in updated.items() if ADJUST_DEFAULTS[key] != value}
+        if stored:
+            element["adjust"] = stored
+        else:
+            element.pop("adjust", None)
+        self._load_photo_controls()
+        if render:
+            self._schedule_photo_render()
+
+    def _schedule_photo_render(self):
+        if self.adjust_render_job:
+            try:
+                self.after_cancel(self.adjust_render_job)
+            except tk.TclError:
+                pass
+        self.adjust_render_job = self.after(25, self._photo_render_now)
+
+    def _photo_render_now(self):
+        self.adjust_render_job = None
+        self._render_all()
+
+    def _photo_slider_pressed(self, _event=None):
+        if self._selected_photo():
+            self._record_history()
+            self.adjust_drag = True
+
+    def _photo_slider_released(self, _event=None):
+        self.adjust_drag = False
+        self._load_photo_controls()
+        element = self._selected_photo()
+        if element:
+            self.status_var.set("Налаштування фото застосовано")
+
+    def _photo_slider_moved(self, key, value):
+        if getattr(self, "loading_photo", False):
+            return
+        value = int(round(float(value)))
+        self.photo_value_labels[key].configure(text=str(value))
+        self._set_photo_adjust({key: value}, record=not self.adjust_drag)
+
+    def _apply_photo_preset(self, values, title):
+        element = self._selected_photo()
+        if not element:
+            self.status_var.set("Спочатку виберіть фото на наліпці")
+            return
+        if values == "auto":
+            black, white = self._auto_levels(element)
+            values = {"black": black, "white": white, "sharpen": max(60, int(
+                (element.get("adjust") or {}).get("sharpen", 0)))}
+            changes = values
+        else:
+            changes = dict(ADJUST_DEFAULTS)
+            changes.update(values)
+        self._set_photo_adjust(changes, record=True)
+        self.status_var.set(f"Пресет фото: {title.split(' ', 1)[-1]}")
+
+    def _photo_compare(self, active):
+        if not self._selected_photo():
+            return
+        self.adjust_compare = active
+        self._render_all()
+        self.status_var.set("Показано оригінал — відпустіть кнопку" if active else "Показано з налаштуваннями")
+
+    # ---- Гістограма та автоматичні рівні --------------------------------------------------
+
+    def _gray_histogram(self, element):
+        path = element.get("path", "")
+        try:
+            key = (path, os.path.getmtime(path))
+        except OSError:
+            key = (path, None)
+        histogram = self.histogram_cache.get(key)
+        if histogram is None:
+            with Image.open(path) as source:
+                source.draft("RGB", (512, 512))
+                image = source.convert("RGBA")
+            image.thumbnail((512, 512))
+            alpha = image.getchannel("A")
+            gray = image.convert("L")
+            histogram = gray.histogram(mask=alpha.point(lambda value: 255 if value > 16 else 0))
+            self.histogram_cache[key] = histogram
+        return histogram
+
+    def _auto_levels(self, element):
+        histogram = self._gray_histogram(element)
+        total = sum(histogram) or 1
+        low_cut, high_cut = total * 0.005, total * 0.995
+        running, black, white = 0, 0, 255
+        for value, count in enumerate(histogram):
+            running += count
+            if running <= low_cut:
+                black = value
+            if running < high_cut:
+                white = value + 1
+        black = max(0, min(black, 200))
+        white = max(black + 10, min(255, white))
+        return black, white
+
+    def _histogram_x(self, value):
+        width = max(20, self.histogram.winfo_width())
+        return 8 + (width - 16) * value / 255.0
+
+    def _histogram_value(self, x):
+        width = max(20, self.histogram.winfo_width())
+        return int(round(max(0, min(255, (x - 8) * 255.0 / (width - 16)))))
+
+    def _draw_histogram(self):
+        canvas = getattr(self, "histogram", None)
+        if canvas is None:
+            return
+        canvas.delete("all")
+        element = self._selected_photo()
+        if not element:
+            return
+        width = max(20, canvas.winfo_width())
+        height = max(20, canvas.winfo_height())
+        try:
+            histogram = self._gray_histogram(element)
+        except Exception:
+            return
+        peak = max(histogram[1:255] or [1]) or 1
+        base = height - 16
+        for x in range(8, width - 8):
+            start = self._histogram_value(x)
+            end = max(start + 1, self._histogram_value(x + 1))
+            count = max(histogram[start:end] or [0])
+            bar = min(1.0, count / peak) * (base - 6)
+            shade = round(start * 0.85 + 20)
+            canvas.create_line(x, base, x, base - bar, fill=f"#{shade:02x}{shade:02x}{shade:02x}")
+        values = dict(ADJUST_DEFAULTS)
+        values.update(element.get("adjust") or {})
+        # Затемнені ділянки, що стануть повністю чорними / білими.
+        canvas.create_rectangle(
+            8, 2, self._histogram_x(values["black"]), base, fill="#000000", stipple="gray50", outline=""
+        )
+        canvas.create_rectangle(
+            self._histogram_x(values["white"]), 2, width - 8, base, fill="#ffffff", stipple="gray50",
+            outline="",
+        )
+        canvas.create_line(8, base, width - 8, base, fill=COLORS["border"])
+        for key, fill in (("black", "#000000"), ("white", "#ffffff")):
+            x = self._histogram_x(values[key])
+            canvas.create_polygon(
+                x, base + 1, x - 7, base + 13, x + 7, base + 13,
+                fill=fill, outline=COLORS["accent"], width=2,
+            )
+
+    def _histogram_press(self, event):
+        element = self._selected_photo()
+        if not element:
+            return
+        values = dict(ADJUST_DEFAULTS)
+        values.update(element.get("adjust") or {})
+        value = self._histogram_value(event.x)
+        self.histogram_target = (
+            "black" if abs(value - values["black"]) <= abs(value - values["white"]) else "white"
+        )
+        self._record_history()
+        self.adjust_drag = True
+        self._histogram_drag(event)
+
+    def _histogram_drag(self, event):
+        target = getattr(self, "histogram_target", None)
+        if not target:
+            return
+        self._set_photo_adjust({target: self._histogram_value(event.x)})
+
+    def _histogram_release(self, _event=None):
+        self.histogram_target = None
+        self.adjust_drag = False
+        self._load_photo_controls()
 
     # ---- Тема оформлення -----------------------------------------------------------------
 
@@ -1011,12 +1558,17 @@ class LabelDesigner(tk.Tk):
 
         notebook = ttk.Notebook(side)
         notebook.pack(fill="both", expand=True)
+        self.notebook = notebook
         props_tab = ttk.Frame(notebook, padding=(4, 10, 4, 4))
+        self.photo_tab = ttk.Frame(notebook, padding=(4, 10, 0, 4))
         layers_tab = ttk.Frame(notebook, padding=(4, 10, 4, 4))
         print_tab = ttk.Frame(notebook, padding=(4, 10, 4, 4))
         notebook.add(props_tab, text="Властивості")
+        notebook.add(self.photo_tab, text="Фото")
         notebook.add(layers_tab, text="Шари")
         notebook.add(print_tab, text="Друк")
+        self._build_photo_tab(self.photo_tab)
+        notebook.bind("<<NotebookTabChanged>>", lambda _e: self._load_photo_controls())
 
         # ---- Вкладка «Властивості» ---------------------------------------------------------
         props_tab.columnconfigure(0, weight=1)
@@ -1103,6 +1655,12 @@ class LabelDesigner(tk.Tk):
             command=self._replace_image,
             style="Tool.TButton",
         ).grid(row=2, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+
+        photo_button = ttk.Button(
+            dims, text="🎨 Чіткість, чорний, ЧБ…", command=self._open_photo_tab, style="Accent.TButton"
+        )
+        photo_button.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        ToolTip(photo_button, "Відкрити вкладку «Фото» (або двічі клацніть по фото)")
 
         rotate = ttk.LabelFrame(self.image_frame, text="Поворот і віддзеркалення", padding=8)
         rotate.grid(row=1, column=0, sticky="ew", pady=(8, 0))
@@ -1892,6 +2450,8 @@ class LabelDesigner(tk.Tk):
                 transform += " ⇆"
             if element.get("flip_v"):
                 transform += " ⇅"
+            if normalized_adjustments(element.get("adjust")):
+                transform += " ✦"
         return f"{prefix} {name[:34]}{transform}{lock}"
 
     def _refresh_layers(self):
@@ -2185,21 +2745,11 @@ class LabelDesigner(tk.Tk):
                         tags=("element", element["id"]),
                     )
                 else:
-                    image = self._transformed_image(element)
                     box_size = (
                         max(1, mm_to_px(element["width"])),
                         max(1, mm_to_px(element["height"])),
                     )
-                    if element.get("preserve_aspect"):
-                        image.thumbnail(box_size, Image.Resampling.LANCZOS)
-                        target = Image.new("RGBA", box_size, (255, 255, 255, 0))
-                        offset = (
-                            (box_size[0] - image.width) // 2,
-                            (box_size[1] - image.height) // 2,
-                        )
-                        target.alpha_composite(image, offset)
-                    else:
-                        target = image.resize(box_size, Image.Resampling.LANCZOS)
+                    target = self._display_bitmap(element, box_size)
                     photo = ImageTk.PhotoImage(target)
                     self.photo_refs[element["id"]] = photo
                     item = self.canvas.create_image(
@@ -2461,6 +3011,14 @@ class LabelDesigner(tk.Tk):
                 )
                 break
         element = self._element(element_id)
+        if element and element.get("type") == "image":
+            self.selected_id = element["id"]
+            self.drag_start = None
+            self.drag_origin = None
+            self._draw_selection()
+            self._load_properties()
+            self._open_photo_tab()
+            return
         if not element or element.get("type") != "text":
             return
 
@@ -2650,6 +3208,7 @@ class LabelDesigner(tk.Tk):
         self.live_apply_job = self.after(140, lambda: self._apply_properties(show_error=False))
 
     def _load_properties(self):
+        self._load_photo_controls()
         self.loading_properties = True
         try:
             element = self._element()
@@ -2798,6 +3357,72 @@ class LabelDesigner(tk.Tk):
         with Image.open(element["path"]) as source:
             image = source.convert("RGBA")
         return self._apply_image_transform(image, element)
+
+    def _element_adjustments(self, element):
+        if self.adjust_compare and element.get("id") == self.selected_id:
+            return None
+        return normalized_adjustments(element.get("adjust"))
+
+    def _element_bitmap(self, element, fit_box, adjust):
+        """Обробити фото: тон → поворот/віддзеркалення → вписати в рамку → Ч/Б або точки."""
+        max_side = max(8, round(math.hypot(*fit_box)))
+        with Image.open(element["path"]) as source:
+            if getattr(source, "format", "") == "JPEG":
+                source.draft("RGB", (max_side, max_side))
+            image = source.convert("RGBA")
+        if max(image.size) > max_side:
+            image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+        if adjust:
+            image = apply_tone_adjustments(image, adjust)
+        image = self._apply_image_transform(image, element)
+        image = fit_image(image, fit_box, bool(element.get("preserve_aspect")))
+        if adjust and adjust["mode"] in ("bw", "dither"):
+            image = apply_bit_mode(image, adjust)
+        if adjust and adjust["white_transparent"]:
+            image = apply_white_transparent(image)
+        return image
+
+    def _display_bitmap(self, element, box_size):
+        """Картинка для полотна (з кешем, щоб повзунки працювали плавно)."""
+        adjust = self._element_adjustments(element)
+        try:
+            mtime = os.path.getmtime(element["path"])
+        except OSError:
+            mtime = None
+        key = json.dumps([
+            element["path"], mtime, adjust, box_size,
+            self._normalize_angle(element.get("rotation", 0)),
+            bool(element.get("flip_h")), bool(element.get("flip_v")),
+            bool(element.get("preserve_aspect")),
+        ], sort_keys=True)
+        cached = self.bitmap_cache.get(key)
+        if cached is not None:
+            return cached
+        if adjust and adjust["mode"] in ("bw", "dither"):
+            # Показуємо саме так, як надрукує принтер: точки 203 dpi, збільшені без згладжування.
+            printer_box = (
+                float(element["width"]) * PRINTER_DOTS_PER_MM,
+                float(element["height"]) * PRINTER_DOTS_PER_MM,
+            )
+            image = self._element_bitmap(element, printer_box, adjust)
+            scale = min(box_size[0] / max(1, image.width), box_size[1] / max(1, image.height))
+            if not element.get("preserve_aspect"):
+                image = image.resize(box_size, Image.Resampling.NEAREST)
+            else:
+                image = image.resize(
+                    (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
+                    Image.Resampling.NEAREST,
+                )
+        else:
+            image = self._element_bitmap(element, box_size, adjust)
+        target = Image.new("RGBA", box_size, (255, 255, 255, 0))
+        target.alpha_composite(
+            image, ((box_size[0] - image.width) // 2, (box_size[1] - image.height) // 2)
+        )
+        self.bitmap_cache[key] = target
+        while len(self.bitmap_cache) > 48:
+            self.bitmap_cache.pop(next(iter(self.bitmap_cache)))
+        return target
 
     def _image_pixel_size(self, path):
         try:
@@ -3886,8 +4511,9 @@ if ($queue) {{
         layout = copy.deepcopy(layout)
         folder = self.data_dir / "print_cache"
         for element in layout.get("elements", []):
+            adjust = normalized_adjustments(element.get("adjust"))
             if (element.get("type") != "image" or not element.get("visible", True)
-                    or not self._has_transform(element)):
+                    or not (self._has_transform(element) or adjust)):
                 continue
             source = os.path.abspath(element.get("path", ""))
             stat = os.stat(source)
@@ -3898,11 +4524,24 @@ if ($queue) {{
                 self._normalize_angle(element.get("rotation", 0)),
                 bool(element.get("flip_h")),
                 bool(element.get("flip_v")),
-            ]).encode("utf-8")).hexdigest()[:32]
+                adjust,
+                float(element.get("width", 0)),
+                float(element.get("height", 0)),
+                bool(element.get("preserve_aspect")),
+            ], sort_keys=True).encode("utf-8")).hexdigest()[:32]
             target = folder / f"{key}.png"
             if not target.is_file():
                 folder.mkdir(parents=True, exist_ok=True)
-                self._transformed_image(element).save(target, "PNG")
+                if adjust:
+                    # Готуємо фото одразу під роздільність принтера (точки — 1:1, інше — 2×).
+                    factor = 1 if adjust["mode"] in ("bw", "dither") else 2
+                    fit_box = (
+                        float(element["width"]) * PRINTER_DOTS_PER_MM * factor,
+                        float(element["height"]) * PRINTER_DOTS_PER_MM * factor,
+                    )
+                    self._element_bitmap(element, fit_box, adjust).save(target, "PNG")
+                else:
+                    self._transformed_image(element).save(target, "PNG")
             element["path"] = str(target)
         return layout
 
