@@ -2048,7 +2048,15 @@ class LabelDesigner(tk.Tk):
         self._schedule_autosave()
         return True
 
-    def _cycle_tab(self, direction):
+    def _cycle_tab(self, direction, event=None):
+        # Лише з головного вікна: у редакторі фото чи діалогах вкладки не перемикаємо.
+        try:
+            if event is not None and event.widget.winfo_toplevel() is not self:
+                return None
+        except (AttributeError, tk.TclError):
+            return None
+        if self.photo_editor is not None:
+            return "break"
         if len(self.documents) > 1 and self.doc in self.documents:
             index = (self.documents.index(self.doc) + direction) % len(self.documents)
             self._activate_document(self.documents[index])
@@ -3203,7 +3211,7 @@ class LabelDesigner(tk.Tk):
         for sequence, direction in (("<Control-Tab>", 1), ("<Control-Shift-Tab>", -1),
                                     ("<Control-ISO_Left_Tab>", -1)):
             try:
-                self.bind_all(sequence, lambda _e, d=direction: self._cycle_tab(d))
+                self.bind_all(sequence, lambda event, d=direction: self._cycle_tab(d, event))
             except tk.TclError:
                 pass
         self.bind("<Delete>", self._delete_shortcut)
