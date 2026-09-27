@@ -1,0 +1,47 @@
+name: Build Windows exe
+
+on:
+  push:
+    paths:
+      - "label_designer/**"
+      - ".github/workflows/build-exe.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install pyinstaller pillow qrcode python-barcode numpy opencv-python-headless
+
+      - name: Self-test photo engine
+        working-directory: label_designer
+        shell: python
+        run: |
+          import os, tempfile
+          from PIL import Image, ImageDraw
+          import label_designer as ld
+          assert ld.photo_available()
+          path = os.path.join(tempfile.gettempdir(), "selftest.png")
+          image = Image.new("RGB", (800, 500), (190, 190, 190))
+          draw = ImageDraw.Draw(image)
+          draw.rectangle([100, 100, 300, 200], fill=(60, 60, 60))
+          image.save(path)
+          result = ld.PhotoProcessor(path).render(ld.photo_params(None))
+          assert set(result.getdata()) <= {0, 255}
+          print("photo engine OK", ld.cv2.__version__)
+
+      - name: Build exe
+        working-directory: label_designer
+        run: python -m PyInstaller --noconfirm XprinterLabelStudio.spec
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: XprinterLabelStudio
+          path: label_designer/dist/XprinterLabelStudio.exe
