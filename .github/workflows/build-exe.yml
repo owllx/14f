@@ -18,13 +18,14 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: python -m pip install pyinstaller pillow qrcode python-barcode numpy opencv-python-headless
+        run: python -m pip install pyinstaller pillow qrcode python-barcode numpy==1.26.4 opencv-python-headless==4.9.0.80
 
       - name: Self-test photo engine
         working-directory: label_designer
         shell: python
         run: |
-          import os, tempfile
+          import os, sys, tempfile
+          sys.path.insert(0, os.getcwd())
           from PIL import Image, ImageDraw
           import label_designer as ld
           assert ld.photo_available()

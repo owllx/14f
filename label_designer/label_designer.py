@@ -2282,7 +2282,9 @@ class LabelDesigner(tk.Tk):
             element["photo"] = params
         element.pop("adjust", None)
         new_size = self._element_pixel_size(element)
-        if [round(value) for value in old_size] != [round(value) for value in new_size]:
+        old_ratio = old_size[0] / max(1.0, old_size[1])
+        new_ratio = new_size[0] / max(1.0, new_size[1])
+        if abs(new_ratio - old_ratio) > 0.005 * max(old_ratio, new_ratio):
             self._refit_image_box(element, new_size)
         self._render_all()
         self._load_properties()
