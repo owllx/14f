@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Servo Trim Sync — працює поруч із Mission Planner і за правилами змінює параметри ArduPilot.
+"""Servo Trim Sync — працює поруч із Mission Planner і виставляє MIN/MAX шести виходів SERVO від TRIM.
 
 Типовий приклад: коли в Mission Planner змінюється SERVO7_TRIM (середнє положення),
 програма сама виставляє SERVO7_MIN = TRIM − 400 і SERVO7_MAX = TRIM + 400.
@@ -12,7 +12,6 @@
 import json
 import os
 import queue
-import re
 import tempfile
 import threading
 import time
@@ -25,7 +24,8 @@ from pymavlink import mavutil
 APP_NAME = "Servo Trim Sync"
 CONFIG_DIR = Path(os.environ.get("APPDATA", tempfile.gettempdir())) / "ServoTrimSync"
 CONFIG_PATH = CONFIG_DIR / "config.json"
-PARAM_NAME_RE = re.compile(r"^[A-Z0-9_]{1,16}$")
+BG = "#f4f6f9"
+GREEN, ORANGE, RED = "#15803d", "#b45309", "#c62828"
 CONNECTION_PRESETS = (
     "udpin:0.0.0.0:14551",
     "udpin:0.0.0.0:14550",
@@ -36,12 +36,6 @@ HEARTBEAT_TIMEOUT = 5.0
 WRITE_RETRY_S = 1.5
 WRITE_ATTEMPTS = 3
 REFRESH_SOURCES_S = 10.0
-
-MODES = {
-    "offset": "Джерело + число",
-    "fixed": "Фіксоване значення",
-}
-
 
 def channel_rules(channel, below, above, low=800, high=2200):
     """Пара правил «MIN/MAX від TRIM» для одного виходу SERVOn."""
@@ -58,7 +52,9 @@ DEFAULT_CONFIG = {
     "connection": CONNECTION_PRESETS[0],
     "baud": "57600",
     "only_disarmed": True,
-    "rules": channel_rules(7, 400, 400) + channel_rules(8, 400, 400),
+    "low": 800,
+    "high": 2200,
+    "outputs": [{"enabled": True, "channel": channel, "below": 400, "above": 400} for channel in range(7, 13)],
 }
 
 
@@ -76,21 +72,15 @@ def compute_target(rule, source_value):
     return int(round(value))
 
 
-def rule_text(rule):
-    if rule["mode"] == "fixed":
-        how = f"= {float(rule['value']):g}"
-    else:
-        value = float(rule["value"])
-        sign = "+" if value >= 0 else "−"
-        how = f"= {rule['source']} {sign} {abs(value):g}"
-    return how
-
-
 def load_config():
     try:
         data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        config = dict(DEFAULT_CONFIG)
+        config = json.loads(json.dumps(DEFAULT_CONFIG))
         config.update({key: data[key] for key in DEFAULT_CONFIG if key in data})
+        outputs = [dict(output) for output in config["outputs"]][:6]
+        while len(outputs) < 6:
+            outputs.append({"enabled": False, "channel": 7 + len(outputs), "below": 400, "above": 400})
+        config["outputs"] = outputs
         return config
     except Exception:
         return json.loads(json.dumps(DEFAULT_CONFIG))
@@ -160,6 +150,8 @@ class MavWorker(threading.Thread):
             self._request_sources()
         elif kind == "apply_all":
             self._apply_all()
+        elif kind == "write_trim":
+            self._write_trim(command[1], command[2], command[3])
 
     def _connect(self, connection, baud):
         self._close()
@@ -276,6 +268,17 @@ class MavWorker(threading.Thread):
         if not applied:
             self.log("Усе вже відповідає правилам")
 
+    def _write_trim(self, name, value, rules):
+        """Користувач ввів TRIM у програмі: записати TRIM і одразу MIN/MAX."""
+        if not self.link_ok:
+            self.log("Немає зв'язку з політником", "error")
+            return
+        if self.only_disarmed and self.armed:
+            self.log("Апарат заармлений — параметри не змінюю", "warn")
+            return
+        self._write(name, value)
+        self._apply_rules(rules, value)
+
     def _apply_rules(self, rules, source_value):
         if self.only_disarmed and self.armed:
             self.log("Апарат заармлений — параметри не змінюю", "warn")
@@ -285,6 +288,9 @@ class MavWorker(threading.Thread):
             value = compute_target(rule, source_value)
             current = self.params.get(rule["target"])
             if current is not None and abs(current - value) < 0.5:
+                continue
+            pending = self.pending.get(rule["target"])
+            if pending and abs(pending["value"] - value) < 0.5:
                 continue
             self._write(rule["target"], value)
             written += 1
@@ -311,145 +317,23 @@ class MavWorker(threading.Thread):
             )
 
 
-class RuleDialog(tk.Toplevel):
-    """Створення або зміна одного правила."""
-
-    def __init__(self, parent, rule=None):
-        super().__init__(parent)
-        self.title("Правило")
-        self.transient(parent)
-        self.resizable(False, False)
-        self.result = None
-        rule = rule or {"enabled": True, "source": "SERVO7_TRIM", "target": "SERVO7_MIN",
-                        "mode": "offset", "value": -400, "low": 800, "high": 2200}
-        frame = ttk.Frame(self, padding=14)
-        frame.pack(fill="both", expand=True)
-        self.source = tk.StringVar(value=rule["source"])
-        self.target = tk.StringVar(value=rule["target"])
-        self.mode = tk.StringVar(value=rule["mode"])
-        self.value = tk.StringVar(value=f"{float(rule['value']):g}")
-        self.low = tk.StringVar(value="" if rule.get("low") in (None, "") else f"{float(rule['low']):g}")
-        self.high = tk.StringVar(value="" if rule.get("high") in (None, "") else f"{float(rule['high']):g}")
-        self.enabled = tk.BooleanVar(value=rule["enabled"])
-        rows = (
-            ("Коли змінюється параметр", ttk.Entry(frame, textvariable=self.source, width=22)),
-            ("Змінювати параметр", ttk.Entry(frame, textvariable=self.target, width=22)),
-        )
-        for row, (label, widget) in enumerate(rows):
-            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=4, padx=(0, 10))
-            widget.grid(row=row, column=1, sticky="ew", pady=4)
-        modes = ttk.Frame(frame)
-        modes.grid(row=2, column=1, sticky="w", pady=4)
-        ttk.Label(frame, text="Як рахувати").grid(row=2, column=0, sticky="w", pady=4)
-        for key, title in MODES.items():
-            ttk.Radiobutton(modes, text=title, value=key, variable=self.mode).pack(anchor="w")
-        ttk.Label(frame, text="Число (напр. -400 або 400)").grid(row=3, column=0, sticky="w", pady=4)
-        ttk.Entry(frame, textvariable=self.value, width=10).grid(row=3, column=1, sticky="w", pady=4)
-        limits = ttk.Frame(frame)
-        limits.grid(row=4, column=1, sticky="w", pady=4)
-        ttk.Label(frame, text="Не менше / не більше").grid(row=4, column=0, sticky="w", pady=4)
-        ttk.Entry(limits, textvariable=self.low, width=8).pack(side="left")
-        ttk.Label(limits, text=" … ").pack(side="left")
-        ttk.Entry(limits, textvariable=self.high, width=8).pack(side="left")
-        ttk.Checkbutton(frame, text="Правило увімкнене", variable=self.enabled).grid(
-            row=5, column=1, sticky="w", pady=(6, 0)
-        )
-        buttons = ttk.Frame(frame)
-        buttons.grid(row=6, column=0, columnspan=2, sticky="e", pady=(14, 0))
-        ttk.Button(buttons, text="Скасувати", command=self.destroy).pack(side="right")
-        ttk.Button(buttons, text="Зберегти", command=self._save).pack(side="right", padx=(0, 6))
-        self.bind("<Return>", lambda _e: self._save())
-        self.bind("<Escape>", lambda _e: self.destroy())
-        self.grab_set()
-
-    def _save(self):
-        source = self.source.get().strip().upper()
-        target = self.target.get().strip().upper()
-        try:
-            for name in (source, target):
-                if not PARAM_NAME_RE.match(name):
-                    raise ValueError(f"Некоректна назва параметра: «{name}» (A–Z, 0–9, _, до 16 символів)")
-            if source == target:
-                raise ValueError("Параметр не може змінювати сам себе")
-            value = float(self.value.get().replace(",", "."))
-            low = float(self.low.get().replace(",", ".")) if self.low.get().strip() else None
-            high = float(self.high.get().replace(",", ".")) if self.high.get().strip() else None
-            if low is not None and high is not None and low > high:
-                raise ValueError("«Не менше» більше за «не більше»")
-        except ValueError as exc:
-            messagebox.showerror("Правило", str(exc), parent=self)
-            return
-        self.result = {"enabled": self.enabled.get(), "source": source, "target": target,
-                       "mode": self.mode.get(), "value": value, "low": low, "high": high}
-        self.destroy()
-
-
-class ChannelDialog(tk.Toplevel):
-    """Швидке додавання «MIN/MAX від TRIM» для каналу SERVOn."""
-
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.title("Додати канал")
-        self.transient(parent)
-        self.resizable(False, False)
-        self.result = None
-        frame = ttk.Frame(self, padding=14)
-        frame.pack(fill="both", expand=True)
-        self.channel = tk.StringVar(value="7")
-        self.below = tk.StringVar(value="400")
-        self.above = tk.StringVar(value="400")
-        self.low = tk.StringVar(value="800")
-        self.high = tk.StringVar(value="2200")
-        fields = (
-            ("Вихід SERVO №", self.channel),
-            ("MIN = TRIM −", self.below),
-            ("MAX = TRIM +", self.above),
-            ("Межі PWM від", self.low),
-            ("до", self.high),
-        )
-        for row, (label, variable) in enumerate(fields):
-            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=4, padx=(0, 10))
-            ttk.Entry(frame, textvariable=variable, width=10).grid(row=row, column=1, sticky="w", pady=4)
-        buttons = ttk.Frame(frame)
-        buttons.grid(row=len(fields), column=0, columnspan=2, sticky="e", pady=(14, 0))
-        ttk.Button(buttons, text="Скасувати", command=self.destroy).pack(side="right")
-        ttk.Button(buttons, text="Додати", command=self._save).pack(side="right", padx=(0, 6))
-        self.bind("<Return>", lambda _e: self._save())
-        self.bind("<Escape>", lambda _e: self.destroy())
-        self.grab_set()
-
-    def _save(self):
-        try:
-            channel = int(self.channel.get())
-            if not 1 <= channel <= 32:
-                raise ValueError("Номер виходу — від 1 до 32")
-            below, above = abs(int(self.below.get())), abs(int(self.above.get()))
-            low, high = int(self.low.get()), int(self.high.get())
-            if low >= high:
-                raise ValueError("Неправильні межі PWM")
-        except ValueError as exc:
-            messagebox.showerror("Канал", str(exc) if str(exc)[0].isupper() else "Введіть цілі числа",
-                                 parent=self)
-            return
-        self.result = channel_rules(channel, below, above, low, high)
-        self.destroy()
-
-
 class App(tk.Tk):
+    """Проста таблиця на 6 виходів: номер SERVO, TRIM і відступи для MIN/MAX."""
+
     def __init__(self):
         super().__init__()
         self.title(f"{APP_NAME} — ArduPilot")
-        self.geometry("980x640")
-        self.minsize(820, 520)
+        self.geometry("1000x640")
+        self.minsize(980, 600)
         self.config_data = load_config()
         self.params = {}
         self.events = queue.Queue()
         self.worker = MavWorker(self.events)
         self.worker.start()
         self.connected_request = False
+        self.link_ok = False
         self._style()
         self._build()
-        self._refresh_rules()
         self._send_rules()
         self.after(50, self._poll_events)
         self.protocol("WM_DELETE_WINDOW", self._close)
@@ -459,30 +343,28 @@ class App(tk.Tk):
         style = ttk.Style(self)
         if "clam" in style.theme_names():
             style.theme_use("clam")
-        self.configure(bg="#f4f6f9")
-        style.configure(".", background="#f4f6f9", font=("Segoe UI", 10))
-        style.configure("TLabelframe", background="#f4f6f9")
+        self.configure(bg=BG)
+        style.configure(".", background=BG, font=("Segoe UI", 10))
+        style.configure("TLabelframe", background=BG)
         style.configure("TLabelframe.Label", foreground="#2563eb", font=("Segoe UI", 9, "bold"))
+        style.configure("Head.TLabel", foreground="#6a7587", font=("Segoe UI", 9, "bold"))
+        style.configure("Hint.TLabel", foreground="#6a7587", font=("Segoe UI", 9))
         style.configure("Accent.TButton", background="#2563eb", foreground="#ffffff",
                         font=("Segoe UI", 10, "bold"), padding=(12, 5))
         style.map("Accent.TButton", background=[("active", "#1d4fd8"), ("disabled", "#a8bff3")])
-        style.configure("Treeview", rowheight=26, font=("Segoe UI", 10))
-        style.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"))
-        style.configure("Hint.TLabel", foreground="#6a7587", font=("Segoe UI", 9))
+        style.configure("Trim.TEntry", padding=4)
 
     def _build(self):
         top = ttk.LabelFrame(self, text="Підключення", padding=10)
-        top.pack(fill="x", padx=10, pady=(10, 6))
-        self.armed_label = tk.Label(top, text="", font=("Segoe UI", 10, "bold"), bg="#f4f6f9")
+        top.pack(fill="x", padx=10, pady=(10, 4))
+        self.armed_label = tk.Label(top, text="", font=("Segoe UI", 10, "bold"), bg=BG)
         self.armed_label.pack(side="right")
-        self.link_label = tk.Label(top, text="● Не підключено", fg="#c62828", bg="#f4f6f9",
-                                   font=("Segoe UI", 10, "bold"))
+        self.link_label = tk.Label(top, text="● Не підключено", fg=RED, bg=BG, font=("Segoe UI", 10, "bold"))
         self.link_label.pack(side="right", padx=(0, 16))
         ttk.Label(top, text="Адреса").pack(side="left")
         self.connection_var = tk.StringVar(value=self.config_data["connection"])
-        connection = ttk.Combobox(top, textvariable=self.connection_var, width=24,
-                                  values=self._connection_choices())
-        connection.pack(side="left", padx=(6, 10))
+        ttk.Combobox(top, textvariable=self.connection_var, width=22,
+                     values=self._connection_choices()).pack(side="left", padx=(6, 10))
         ttk.Label(top, text="Швидкість").pack(side="left")
         self.baud_var = tk.StringVar(value=self.config_data["baud"])
         ttk.Combobox(top, textvariable=self.baud_var, values=BAUD_RATES, width=8).pack(side="left", padx=(6, 10))
@@ -493,51 +375,85 @@ class App(tk.Tk):
             self,
             text=("Mission Planner: Ctrl+F → «Mavlink» → UDP Client, 127.0.0.1, порт 14551, "
                   "галочка «Write access» → Connect. Тут — адреса udpin:0.0.0.0:14551."),
-            style="Hint.TLabel",
+            style="Hint.TLabel", wraplength=960,
         ).pack(fill="x", padx=14)
 
-        middle = ttk.LabelFrame(self, text="Правила: коли змінюється одне — змінювати інше", padding=10)
-        middle.pack(fill="both", expand=True, padx=10, pady=6)
-        buttons = ttk.Frame(middle, padding=(10, 0, 0, 0))
-        buttons.pack(side="right", fill="y")
-        for text, command in (
-            ("+ Канал MIN/MAX", self._add_channel),
-            ("+ Правило", self._add_rule),
-            ("Змінити", self._edit_rule),
-            ("Увімк. / вимк.", self._toggle_rule),
-            ("Видалити", self._delete_rule),
-        ):
-            ttk.Button(buttons, text=text, command=command).pack(fill="x", pady=2)
-        ttk.Separator(buttons).pack(fill="x", pady=8)
-        self.apply_button = ttk.Button(buttons, text="Застосувати зараз", style="Accent.TButton",
-                                       command=self._apply_now)
-        self.apply_button.pack(fill="x", pady=2)
-        self.only_disarmed_var = tk.BooleanVar(value=self.config_data["only_disarmed"])
-        ttk.Checkbutton(buttons, text="Лише коли\nроззброєний", variable=self.only_disarmed_var,
-                        command=self._options_changed).pack(anchor="w", pady=(10, 0))
+        table = ttk.LabelFrame(self, text="Виходи SERVO", padding=10)
+        table.pack(fill="x", padx=10, pady=6)
+        headers = ("", "Вихід", "TRIM (середнє)", "", "MIN = TRIM −", "MAX = TRIM +",
+                   "MIN зараз", "MAX зараз", "")
+        for column, text in enumerate(headers):
+            ttk.Label(table, text=text, style="Head.TLabel").grid(row=0, column=column, padx=4, pady=(0, 4))
+        self.rows = []
+        for index, output in enumerate(self.config_data["outputs"]):
+            self.rows.append(self._build_row(table, index + 1, output))
 
-        columns = ("on", "source", "target", "how", "limits", "source_now", "target_now")
-        self.tree = ttk.Treeview(middle, columns=columns, show="headings", height=8, selectmode="browse")
-        for column, title, width in (
-            ("on", "Увімк.", 50), ("source", "Коли змінюється", 130), ("target", "Змінювати", 120),
-            ("how", "Як", 180), ("limits", "Межі", 90), ("source_now", "Зараз", 60),
-            ("target_now", "Ціль", 60),
-        ):
-            self.tree.heading(column, text=title)
-            self.tree.column(column, width=width, anchor="center" if column != "how" else "w")
-        self.tree.pack(side="left", fill="both", expand=True)
-        self.tree.bind("<Double-1>", lambda _e: self._edit_rule())
-        scroll = ttk.Scrollbar(middle, orient="vertical", command=self.tree.yview)
-        scroll.pack(side="left", fill="y")
-        self.tree.configure(yscrollcommand=scroll.set)
+        options = ttk.Frame(self, padding=(14, 2))
+        options.pack(fill="x")
+        ttk.Label(options, text="Межі PWM:").pack(side="left")
+        self.low_var = tk.StringVar(value=str(self.config_data["low"]))
+        self.high_var = tk.StringVar(value=str(self.config_data["high"]))
+        for variable in (self.low_var, self.high_var):
+            entry = ttk.Entry(options, textvariable=variable, width=6)
+            entry.pack(side="left", padx=4)
+            entry.bind("<FocusOut>", lambda _e: self._settings_changed())
+            entry.bind("<Return>", lambda _e: self._settings_changed())
+        self.only_disarmed_var = tk.BooleanVar(value=self.config_data["only_disarmed"])
+        ttk.Checkbutton(options, text="Змінювати лише коли апарат роззброєний",
+                        variable=self.only_disarmed_var, command=self._settings_changed).pack(side="left", padx=16)
+        self.apply_button = ttk.Button(options, text="Виставити MIN/MAX усім", style="Accent.TButton",
+                                       command=self._apply_all)
+        self.apply_button.pack(side="right")
+
+        ttk.Label(
+            self,
+            text=("Змінили TRIM тут (Enter) або в Mission Planner — MIN і MAX виставляться самі. "
+                  "Прошивку програма не змінює: лише параметри, як у Full Parameter List."),
+            style="Hint.TLabel", wraplength=960,
+        ).pack(fill="x", padx=14, pady=(2, 0))
 
         bottom = ttk.LabelFrame(self, text="Журнал", padding=6)
-        bottom.pack(fill="both", padx=10, pady=(0, 10))
-        self.log_text = tk.Text(bottom, height=9, font=("Consolas", 9), relief="flat", state="disabled",
+        bottom.pack(fill="both", expand=True, padx=10, pady=(6, 10))
+        self.log_text = tk.Text(bottom, height=7, font=("Consolas", 9), relief="flat", state="disabled",
                                 bg="#ffffff")
         self.log_text.pack(fill="both", expand=True)
-        for level, color in (("ok", "#15803d"), ("warn", "#a16207"), ("error", "#c62828"), ("info", "#1f2933")):
+        for level, color in (("ok", GREEN), ("warn", ORANGE), ("error", RED), ("info", "#1f2933")):
             self.log_text.tag_configure(level, foreground=color)
+
+    def _build_row(self, parent, row, output):
+        widgets = {}
+        widgets["enabled"] = tk.BooleanVar(value=output["enabled"])
+        ttk.Checkbutton(parent, variable=widgets["enabled"], command=self._settings_changed).grid(
+            row=row, column=0, padx=4, pady=3)
+        widgets["channel"] = tk.StringVar(value=str(output["channel"]))
+        channel = ttk.Spinbox(parent, from_=1, to=32, width=5, textvariable=widgets["channel"],
+                              command=self._settings_changed)
+        channel.grid(row=row, column=1, padx=4, pady=3)
+        channel.bind("<FocusOut>", lambda _e: self._settings_changed())
+        channel.bind("<Return>", lambda _e: self._settings_changed())
+        widgets["trim"] = tk.StringVar()
+        trim = ttk.Entry(parent, textvariable=widgets["trim"], width=9, style="Trim.TEntry",
+                         font=("Segoe UI", 11, "bold"))
+        trim.grid(row=row, column=2, padx=4, pady=3)
+        trim.bind("<Return>", lambda _e, w=widgets: self._write_trim(w))
+        trim.bind("<Key>", lambda event, w=widgets: self._trim_edited(event, w), add="+")
+        widgets["trim_entry"] = trim
+        widgets["editing"] = False
+        write = ttk.Button(parent, text="Записати", command=lambda w=widgets: self._write_trim(w))
+        write.grid(row=row, column=3, padx=4, pady=3)
+        for key, column in (("below", 4), ("above", 5)):
+            widgets[key] = tk.StringVar(value=str(output[key]))
+            spin = ttk.Spinbox(parent, from_=0, to=1000, increment=10, width=7, textvariable=widgets[key],
+                               command=self._settings_changed)
+            spin.grid(row=row, column=column, padx=4, pady=3)
+            spin.bind("<FocusOut>", lambda _e: self._settings_changed())
+            spin.bind("<Return>", lambda _e: self._settings_changed())
+        for key, column in (("min_now", 6), ("max_now", 7)):
+            widgets[key] = tk.Label(parent, text="—", width=7, bg=BG, font=("Segoe UI", 10, "bold"))
+            widgets[key].grid(row=row, column=column, padx=4, pady=3)
+        widgets["state"] = tk.Label(parent, text="", width=16, anchor="w", bg=BG, font=("Segoe UI", 9))
+        widgets["state"].grid(row=row, column=8, padx=4, pady=3, sticky="w")
+        return widgets
 
     def _connection_choices(self):
         choices = list(CONNECTION_PRESETS)
@@ -548,84 +464,127 @@ class App(tk.Tk):
             pass
         return choices
 
-    # ---- правила -----------------------------------------------------------------------
-    def _refresh_rules(self):
-        selected = self.tree.selection()
-        self.tree.delete(*self.tree.get_children())
-        for index, rule in enumerate(self.config_data["rules"]):
-            limits = f"{self._number(rule.get('low'))} … {self._number(rule.get('high'))}"
-            source_now = self.params.get(rule["source"])
-            target_now = self.params.get(rule["target"])
-            self.tree.insert("", "end", iid=str(index), values=(
-                "✓" if rule["enabled"] else "—", rule["source"], rule["target"], rule_text(rule), limits,
-                "" if source_now is None else f"{source_now:g}",
-                "" if target_now is None else f"{target_now:g}",
-            ))
-        for iid in selected:
-            if self.tree.exists(iid):
-                self.tree.selection_set(iid)
+    # ---- налаштування та правила -----------------------------------------------------------
+    def _read_outputs(self, report=False):
+        """Прочитати таблицю; повертає список виходів або None, якщо є помилка."""
+        outputs, seen = [], set()
+        try:
+            low, high = int(self.low_var.get()), int(self.high_var.get())
+            if not 500 <= low < high <= 2500:
+                raise ValueError("Межі PWM мають бути в 500…2500 і «від» менше «до»")
+            for number, widgets in enumerate(self.rows, start=1):
+                channel = int(widgets["channel"].get())
+                if not 1 <= channel <= 32:
+                    raise ValueError(f"Рядок {number}: номер виходу 1…32")
+                below, above = int(widgets["below"].get()), int(widgets["above"].get())
+                if below < 0 or above < 0:
+                    raise ValueError(f"Рядок {number}: відступи не можуть бути від'ємними")
+                enabled = widgets["enabled"].get()
+                if enabled and channel in seen:
+                    raise ValueError(f"SERVO{channel} вказано двічі")
+                if enabled:
+                    seen.add(channel)
+                outputs.append({"enabled": enabled, "channel": channel, "below": below, "above": above})
+        except ValueError as exc:
+            if report:
+                text = str(exc) if str(exc)[:1].isupper() or "SERVO" in str(exc) else "Введіть цілі числа"
+                messagebox.showerror(APP_NAME, text)
+            return None, None, None
+        return outputs, low, high
 
-    @staticmethod
-    def _number(value):
-        return "" if value in (None, "") else f"{float(value):g}"
-
-    def _selected_index(self):
-        selection = self.tree.selection()
-        return int(selection[0]) if selection else None
-
-    def _rules_changed(self):
+    def _settings_changed(self):
+        outputs, low, high = self._read_outputs()
+        if outputs is None:
+            return
+        self.config_data.update({"outputs": outputs, "low": low, "high": high,
+                                 "only_disarmed": self.only_disarmed_var.get()})
         save_config(self._collect_config())
-        self._refresh_rules()
         self._send_rules()
+        self._refresh_values()
+
+    def _rules(self):
+        rules = []
+        for output in self.config_data["outputs"]:
+            if output["enabled"]:
+                rules += channel_rules(output["channel"], output["below"], output["above"],
+                                       self.config_data["low"], self.config_data["high"])
+        return rules
 
     def _send_rules(self):
-        rules = json.loads(json.dumps(self.config_data["rules"]))
-        self.worker.commands.put(("rules", rules, self.only_disarmed_var.get()))
+        self.worker.commands.put(("rules", self._rules(), self.config_data["only_disarmed"]))
 
-    def _add_channel(self):
-        dialog = ChannelDialog(self)
-        self.wait_window(dialog)
-        if dialog.result:
-            self.config_data["rules"].extend(dialog.result)
-            self._rules_changed()
+    @staticmethod
+    def _trim_edited(event, widgets):
+        if event.keysym not in ("Return", "KP_Enter", "Tab"):
+            widgets["editing"] = True
+            widgets["trim_entry"].configure(foreground=ORANGE)
 
-    def _add_rule(self):
-        dialog = RuleDialog(self)
-        self.wait_window(dialog)
-        if dialog.result:
-            self.config_data["rules"].append(dialog.result)
-            self._rules_changed()
-
-    def _edit_rule(self):
-        index = self._selected_index()
-        if index is None:
+    def _write_trim(self, widgets):
+        typed = widgets["trim"].get().strip()
+        outputs, low, high = self._read_outputs(report=True)
+        if outputs is None:
             return
-        dialog = RuleDialog(self, self.config_data["rules"][index])
-        self.wait_window(dialog)
-        if dialog.result:
-            self.config_data["rules"][index] = dialog.result
-            self._rules_changed()
+        self._settings_changed()
+        widgets["trim"].set(typed)
+        channel = int(widgets["channel"].get())
+        if not widgets["enabled"].get():
+            messagebox.showinfo(APP_NAME, f"SERVO{channel} вимкнено в таблиці")
+            return
+        try:
+            trim = int(widgets["trim"].get())
+        except ValueError:
+            messagebox.showerror(APP_NAME, "TRIM має бути цілим числом, напр. 1500")
+            return
+        if not low <= trim <= high:
+            messagebox.showerror(APP_NAME, f"TRIM має бути в межах {low}…{high}")
+            return
+        if not self.link_ok:
+            messagebox.showwarning(APP_NAME, "Немає зв'язку з політником")
+            return
+        rules = channel_rules(channel, int(widgets["below"].get()), int(widgets["above"].get()), low, high)
+        self.worker.commands.put(("write_trim", f"SERVO{channel}_TRIM", trim, rules))
+        widgets["editing"] = False
+        widgets["trim_entry"].configure(foreground="#1f2933")
+        self.focus_set()
 
-    def _toggle_rule(self):
-        index = self._selected_index()
-        if index is not None:
-            rule = self.config_data["rules"][index]
-            rule["enabled"] = not rule["enabled"]
-            self._rules_changed()
-
-    def _delete_rule(self):
-        index = self._selected_index()
-        if index is not None and messagebox.askyesno("Видалити", "Видалити вибране правило?"):
-            del self.config_data["rules"][index]
-            self._rules_changed()
-
-    def _options_changed(self):
-        self._rules_changed()
-
-    def _apply_now(self):
+    def _apply_all(self):
+        if self._read_outputs(report=True)[0] is None:
+            return
+        self._settings_changed()
         self.worker.commands.put(("apply_all",))
 
-    # ---- підключення -------------------------------------------------------------------
+    def _refresh_values(self):
+        low, high = self.config_data["low"], self.config_data["high"]
+        for widgets in self.rows:
+            try:
+                channel = int(widgets["channel"].get())
+                below, above = int(widgets["below"].get()), int(widgets["above"].get())
+            except ValueError:
+                continue
+            trim = self.params.get(f"SERVO{channel}_TRIM")
+            current_min = self.params.get(f"SERVO{channel}_MIN")
+            current_max = self.params.get(f"SERVO{channel}_MAX")
+            if trim is not None and not widgets["editing"]:
+                widgets["trim"].set(f"{trim:g}")
+            enabled = widgets["enabled"].get()
+            for key, value, expected in (
+                ("min_now", current_min, None if trim is None else max(low, min(high, round(trim - below)))),
+                ("max_now", current_max, None if trim is None else max(low, min(high, round(trim + above)))),
+            ):
+                ok = value is not None and expected is not None and abs(value - expected) < 0.5
+                widgets[key].configure(text="—" if value is None else f"{value:g}",
+                                       fg=GREEN if ok or not enabled else ORANGE)
+            if not enabled:
+                state, color = "вимкнено", "#6a7587"
+            elif trim is None:
+                state, color = "", "#6a7587"
+            elif widgets["min_now"].cget("fg") == GREEN and widgets["max_now"].cget("fg") == GREEN:
+                state, color = "✓ відповідає", GREEN
+            else:
+                state, color = "не відповідає", ORANGE
+            widgets["state"].configure(text=state, fg=color)
+
+    # ---- підключення ---------------------------------------------------------------------
     def _collect_config(self):
         self.config_data["connection"] = self.connection_var.get().strip()
         self.config_data["baud"] = self.baud_var.get().strip() or "57600"
@@ -641,12 +600,12 @@ class App(tk.Tk):
         config = self._collect_config()
         save_config(config)
         if not config["connection"]:
-            messagebox.showerror("Підключення", "Вкажіть адресу підключення")
+            messagebox.showerror(APP_NAME, "Вкажіть адресу підключення")
             return
         try:
             int(config["baud"])
         except ValueError:
-            messagebox.showerror("Підключення", "Швидкість має бути числом")
+            messagebox.showerror(APP_NAME, "Швидкість має бути числом")
             return
         self.connected_request = True
         self.connect_button.configure(text="Відключитися")
@@ -662,22 +621,20 @@ class App(tk.Tk):
                 if kind == "log":
                     self._log(event[1], event[2])
                 elif kind == "link":
-                    ok, text = event[1], event[2]
-                    self.link_label.configure(text=f"● {text}", fg="#15803d" if ok else "#c62828")
-                    if not ok:
+                    self.link_ok = event[1]
+                    self.link_label.configure(text=f"● {event[2]}", fg=GREEN if event[1] else RED)
+                    if not event[1]:
                         self.armed_label.configure(text="")
                 elif kind == "armed":
-                    self.armed_label.configure(
-                        text="ЗААРМЛЕНИЙ" if event[1] else "роззброєний",
-                        fg="#c62828" if event[1] else "#15803d",
-                    )
+                    self.armed_label.configure(text="ЗААРМЛЕНИЙ" if event[1] else "роззброєний",
+                                               fg=RED if event[1] else GREEN)
                 elif kind == "param":
                     self.params[event[1]] = event[2]
                     refresh = True
         except queue.Empty:
             pass
         if refresh:
-            self._refresh_rules()
+            self._refresh_values()
         self.after(100, self._poll_events)
 
     def _log(self, text, level="info"):
@@ -690,6 +647,7 @@ class App(tk.Tk):
         self.log_text.configure(state="disabled")
 
     def _close(self):
+        self._settings_changed()
         save_config(self._collect_config())
         self.worker.commands.put(("quit",))
         self.destroy()
