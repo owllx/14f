@@ -12,10 +12,12 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Windows.Forms;
 using MissionPlanner;
 using MissionPlanner.Controls;
@@ -27,7 +29,17 @@ namespace ServoTrimSyncRefresh
         private static readonly Regex ServoParam = new Regex(@"^SERVO\d{1,2}_(MIN|MAX|TRIM)$");
         private readonly HashSet<string> pending = new HashSet<string>();
         private MAVLinkInterface port;
-        private Timer timer;
+        private System.Windows.Forms.Timer timer;
+
+        // Самодіагностика: Servo Trim Sync читає цей файл і показує, чи плагін працює.
+        private static readonly string StatusPath = Path.Combine(Path.GetTempPath(), "ServoTrimSyncRefresh.status");
+        private DateTime loadedAt = DateTime.Now;
+        private DateTime lastStatus = DateTime.MinValue;
+        private long packets;
+        private long servoValues;
+        private long refreshed;
+        private int controlsSeen = -1;
+        private string lastError = "";
 
         public override string Name { get { return "Servo Trim Sync — live SERVO MIN/TRIM/MAX"; } }
         public override string Version { get { return "1.0"; } }
@@ -40,10 +52,12 @@ namespace ServoTrimSyncRefresh
 
         public override bool Loaded()
         {
-            timer = new Timer();
+            timer = new System.Windows.Forms.Timer();
             timer.Interval = 250;
             timer.Tick += Tick;
             timer.Start();
+            loadedAt = DateTime.Now;
+            WriteStatus();
             return true;
         }
 
@@ -61,6 +75,7 @@ namespace ServoTrimSyncRefresh
         {
             try
             {
+                Interlocked.Increment(ref packets);
                 if (message.msgid != (uint)MAVLink.MAVLINK_MSG_ID.PARAM_VALUE)
                     return;
                 var value = (MAVLink.mavlink_param_value_t)message.data;
@@ -70,17 +85,21 @@ namespace ServoTrimSyncRefresh
                     name = name.Substring(0, end);
                 if (!ServoParam.IsMatch(name))
                     return;
+                Interlocked.Increment(ref servoValues);
                 lock (pending)
                     pending.Add(name);
             }
-            catch
+            catch (Exception ex)
             {
+                lastError = "packet: " + ex.Message;
             }
         }
 
         // Потік інтерфейсу.
         private void Tick(object sender, EventArgs e)
         {
+            if ((DateTime.Now - lastStatus).TotalSeconds >= 2)
+                WriteStatus();
             try
             {
                 var current = MainV2.comPort;
@@ -107,6 +126,7 @@ namespace ServoTrimSyncRefresh
                 if (wanted.Count == 0)
                     return;
 
+                var seen = 0;
                 foreach (Form form in Application.OpenForms.Cast<Form>().ToList())
                 {
                     foreach (var control in AllControls(form))
@@ -114,13 +134,38 @@ namespace ServoTrimSyncRefresh
                         var number = control as MavlinkNumericUpDown;
                         if (number != null)
                         {
-                            RefreshNumber(number, wanted, parameters);
+                            if (number.ParamName != null && ServoParam.IsMatch(number.ParamName))
+                                seen++;
+                            if (RefreshNumber(number, wanted, parameters))
+                                refreshed++;
                             continue;
                         }
                         if (control.GetType().Name == "ConfigRawParams")
-                            RefreshRawParams(control, wanted, parameters);
+                        {
+                            seen++;
+                            refreshed += RefreshRawParams(control, wanted, parameters);
+                        }
                     }
                 }
+                controlsSeen = seen;
+                WriteStatus();
+            }
+            catch (Exception ex)
+            {
+                lastError = "refresh: " + ex.Message;
+            }
+        }
+
+        private void WriteStatus()
+        {
+            lastStatus = DateTime.Now;
+            try
+            {
+                File.WriteAllText(StatusPath, string.Format(
+                    "loaded={0:o}\nnow={1:o}\nsubscribed={2}\npackets={3}\nservo_values={4}\nrefreshed={5}\n" +
+                    "controls_seen={6}\nerror={7}\n",
+                    loadedAt, DateTime.Now, port != null, Interlocked.Read(ref packets),
+                    Interlocked.Read(ref servoValues), refreshed, controlsSeen, lastError.Replace("\n", " ")));
             }
             catch
             {
@@ -137,20 +182,22 @@ namespace ServoTrimSyncRefresh
             }
         }
 
-        private static void RefreshNumber(MavlinkNumericUpDown number, HashSet<string> wanted,
+        private static bool RefreshNumber(MavlinkNumericUpDown number, HashSet<string> wanted,
             MAVLink.MAVLinkParamList parameters)
         {
             if (number.ParamName == null || !wanted.Contains(number.ParamName) || number.ContainsFocus)
-                return;
+                return false;
             var value = (decimal)(float)parameters[number.ParamName];
             if (number.Value == value)
-                return;
+                return false;
             // setup() перечитує значення з MP без запису в політник (так само будує сторінку Servo Output).
             number.setup(800, 2200, 1, 1, number.ParamName, parameters);
+            return true;
         }
 
-        private static void RefreshRawParams(Control page, HashSet<string> wanted, MAVLink.MAVLinkParamList parameters)
+        private static int RefreshRawParams(Control page, HashSet<string> wanted, MAVLink.MAVLinkParamList parameters)
         {
+            var count = 0;
             var flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
             var type = page.GetType();
             var gridField = type.GetField("Params", flags);
@@ -159,13 +206,13 @@ namespace ServoTrimSyncRefresh
             var changesField = type.GetField("_changes", flags);
             var startupField = type.GetField("startup", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
             if (gridField == null || commandField == null || valueField == null)
-                return;
+                return 0;
             var grid = gridField.GetValue(page) as DataGridView;
             var commandColumn = commandField.GetValue(page) as DataGridViewColumn;
             var valueColumn = valueField.GetValue(page) as DataGridViewColumn;
             var changes = changesField != null ? changesField.GetValue(page) as Hashtable : null;
             if (grid == null || commandColumn == null || valueColumn == null)
-                return;
+                return 0;
 
             var previous = startupField != null && (bool)startupField.GetValue(null);
             try
@@ -184,7 +231,10 @@ namespace ServoTrimSyncRefresh
                         continue;
                     var text = parameters[name].ToString();
                     if ((row.Cells[valueColumn.Index].Value as string) != text)
+                    {
                         row.Cells[valueColumn.Index].Value = text;
+                        count++;
+                    }
                 }
             }
             finally
@@ -192,6 +242,7 @@ namespace ServoTrimSyncRefresh
                 if (startupField != null)
                     startupField.SetValue(null, previous);
             }
+            return count;
         }
     }
 }

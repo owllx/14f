@@ -35,7 +35,7 @@ from pymavlink.dialects.v10 import ardupilotmega as _dialect_v10  # noqa: E402,F
 from pymavlink.dialects.v20 import ardupilotmega as _dialect_v20  # noqa: E402,F401
 
 APP_NAME = "Servo Trim Sync"
-APP_VERSION = "1.4"
+APP_VERSION = "1.5"
 CONFIG_DIR = Path(os.environ.get("APPDATA", tempfile.gettempdir())) / "ServoTrimSync"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 AUTO_SOURCE = "auto"
@@ -53,7 +53,8 @@ SOURCE_TITLES = {
 CONNECTION_PRESETS = (AUTO_SOURCE, MP_SOURCE, MIRROR_SOURCE, "tcp:127.0.0.1:5760")
 RETRY_OPEN_S = 2.0
 SILENT_REOPEN_S = 6.0
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
+SERVO_CHANNELS = (6, 7, 8, 9, 10)  # програма працює лише з цими виходами
 BAUD_RATES = ("57600", "115200", "921600")
 HEARTBEAT_TIMEOUT = 5.0
 WRITE_RETRY_S = 1.5
@@ -136,7 +137,7 @@ DEFAULT_CONFIG = {
     "low": 800,
     "high": 2200,
     "outputs": [{"enabled": True, "channel": channel, "below": 400, "above": 400, "name": ""}
-                for channel in range(7, 13)],
+                for channel in SERVO_CHANNELS],
     "auto": True,
     "autoconnect": True,
     "step": 10,
@@ -167,11 +168,22 @@ def load_config():
         data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         config = json.loads(json.dumps(DEFAULT_CONFIG))
         config.update({key: data[key] for key in DEFAULT_CONFIG if key in data})
-        outputs = [dict(output) for output in config["outputs"]][:6]
-        while len(outputs) < 6:
-            outputs.append({"enabled": False, "channel": 7 + len(outputs), "below": 400, "above": 400})
-        for output in outputs:
+        # Рівно SERVO6…SERVO10; налаштування старих рядків з тими самими номерами зберігаються.
+        saved = {}
+        for output in config["outputs"]:
+            try:
+                saved.setdefault(int(output["channel"]), dict(output))
+            except (KeyError, TypeError, ValueError):
+                pass
+        outputs = []
+        for channel in SERVO_CHANNELS:
+            output = saved.get(channel) or {"enabled": True, "below": 400, "above": 400}
+            output["channel"] = channel
             output.setdefault("name", "")
+            output.setdefault("enabled", True)
+            output.setdefault("below", 400)
+            output.setdefault("above", 400)
+            outputs.append(output)
         config["outputs"] = outputs
         if int(data.get("config_version", 1)) < CONFIG_VERSION:
             # Старі версії підключалися лише через MAVLink Mirror — тепер «Автоматично».
@@ -678,6 +690,49 @@ STEPS = (1, 5, 10, 25, 50)
 COLUMNS = (30, 112, 118, 128, 118, 118)  # галочка, вихід, MIN, TRIM, MAX, у політнику
 
 
+PLUGIN_STATUS_FILE = "ServoTrimSyncRefresh.status"
+
+
+def plugin_runtime_status():
+    """Що пише про себе плагін у Mission Planner (файл у TEMP) або None, якщо файлу немає."""
+    path = Path(tempfile.gettempdir()) / PLUGIN_STATUS_FILE
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        age = time.time() - path.stat().st_mtime
+    except OSError:
+        return None
+    data = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+    data["age"] = age
+    return data
+
+
+def plugin_report(installed):
+    """Зрозумілий стан плагіна: (текст, колір)."""
+    where = ", ".join(str(folder) for folder in installed)
+    status = plugin_runtime_status()
+    if status is None or status["age"] > 8:
+        if count_mission_planner_processes():
+            return (f"Плагін скопійовано ({where}), але Mission Planner його не запустив.\n"
+                    "Закрийте MP повністю й відкрийте знову. Якщо не допоможе — ця збірка MP\n"
+                    "не завантажує плагіни (див. Help → Plugins).", ERR)
+        return (f"Плагін скопійовано ({where}).\nЗапустіть Mission Planner — він підхопить плагін.", MUTED)
+    packets = int(status.get("packets", "0") or 0)
+    values = int(status.get("servo_values", "0") or 0)
+    refreshed = int(status.get("refreshed", "0") or 0)
+    seen = int(status.get("controls_seen", "-1") or -1)
+    error = status.get("error", "").strip()
+    if packets == 0:
+        text, color = "Плагін працює, але ще не бачить пакетів від політника", WARN
+    elif values and seen == 0:
+        text, color = ("Плагін працює, але не знайшов полів SERVO —\nвідкрийте в MP сторінку Servo Output", WARN)
+    else:
+        text, color = f"✓ Плагін працює · отримано значень SERVO: {values} · оновлено полів: {refreshed}", OK
+    if error:
+        text += f"\nПомилка плагіна: {error[:120]}"
+        color = ERR
+    return text, color
+
+
 def dark_title_bar(window):
     """Windows 10/11: темний заголовок вікна в кольорі програми (замість світлої смуги)."""
     if os.name != "nt":
@@ -1059,7 +1114,7 @@ class App(tk.Tk):
             anchor = "w" if column in (1,) else ("e" if column == 5 else "center")
             self._label(header, text, FAINT, (FONT, 8, "bold"), anchor=anchor).grid(
                 row=0, column=column, sticky="ew", pady=(0, 6))
-        for index in range(6):
+        for index in range(len(SERVO_CHANNELS)):
             tk.Frame(table, bg=LINE, height=1).pack(fill="x")
             self.rows.append(self._build_row(table, index))
         self._line(self)
@@ -1610,7 +1665,7 @@ class App(tk.Tk):
                     FAINT, (FONT, 8), justify="left").grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
         section(5, "ВИХОДИ")
-        self._label(body, "SERVO №", MUTED, (FONT, 8)).grid(row=6, column=1, sticky="w", padx=(8, 0))
+        self._label(body, "Вихід", MUTED, (FONT, 8)).grid(row=6, column=1, sticky="w", padx=(8, 0))
         self._label(body, "Назва (необов'язково)", MUTED, (FONT, 8)).grid(row=6, column=2, columnspan=2,
                                                                          sticky="w")
         rows = []
@@ -1618,8 +1673,8 @@ class App(tk.Tk):
             enabled = check(7 + index, "", output["enabled"])
             channel = tk.StringVar(value=str(output["channel"]))
             name = tk.StringVar(value=output.get("name", ""))
-            ttk.Spinbox(body, from_=1, to=32, textvariable=channel, width=5).grid(
-                row=7 + index, column=1, sticky="w", padx=(8, 8), pady=2)
+            self._label(body, f"SERVO{output['channel']}", TEXT, self.font_strong).grid(
+                row=7 + index, column=1, sticky="w", padx=(8, 12), pady=2)
             ttk.Entry(body, textvariable=name, width=22).grid(row=7 + index, column=2, columnspan=2, sticky="ew",
                                                               pady=2)
             rows.append((enabled, channel, name))
@@ -1674,7 +1729,7 @@ class App(tk.Tk):
         section(16, "MISSION PLANNER")
         plugin_row = tk.Frame(body, bg=BG)
         plugin_row.grid(row=17, column=0, columnspan=4, sticky="ew", pady=3)
-        plugin_status = self._label(plugin_row, "", MUTED, (FONT, 9), justify="left", anchor="w", wraplength=300)
+        plugin_status = self._label(plugin_row, "", MUTED, (FONT, 9), justify="left", anchor="w", wraplength=380)
         plugin_status.pack(side="left", fill="x", expand=True)
 
         plugin_button = FlatButton(plugin_row, "", lambda: None, padx=12, pady=5, bg=SURFACE, fg=ACCENT,
@@ -1684,9 +1739,20 @@ class App(tk.Tk):
         def refresh_plugin_status():
             folders = find_mission_planner_dirs()
             installed = [folder for folder in folders if (folder / "plugins" / PLUGIN_FILE).is_file()]
-            if installed:
-                plugin_status.configure(text="✓ Плагін встановлено (необов'язковий):\n"
-                                             "сторінки Mission Planner оновлюються самі", fg=OK)
+            try:
+                bundled = plugin_source_path().read_bytes()
+            except OSError:
+                bundled = None
+            outdated = [folder for folder in installed
+                        if bundled is not None and (folder / "plugins" / PLUGIN_FILE).read_bytes() != bundled]
+            if outdated:
+                plugin_status.configure(text="Встановлено стару версію плагіна — натисніть «Оновити»,\n"
+                                             "потім перезапустіть Mission Planner", fg=WARN)
+                plugin_button.configure(text="Оновити")
+                plugin_button.command = lambda: self._install_plugin(window, refresh_plugin_status)
+            elif installed:
+                text, color = plugin_report(installed)
+                plugin_status.configure(text=text, fg=color)
                 plugin_button.configure(text="Видалити")
                 plugin_button.command = lambda: self._remove_plugin(window, installed, refresh_plugin_status)
             else:
@@ -1696,6 +1762,13 @@ class App(tk.Tk):
                 plugin_button.command = lambda: self._install_plugin(window, refresh_plugin_status)
 
         refresh_plugin_status()
+
+        def keep_refreshing():
+            if window.winfo_exists():
+                refresh_plugin_status()
+                window.after(2000, keep_refreshing)
+
+        window.after(2000, keep_refreshing)
 
         buttons = tk.Frame(body, bg=BG)
         buttons.grid(row=18, column=0, columnspan=4, sticky="e", pady=(16, 0))
