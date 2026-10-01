@@ -16,6 +16,7 @@ import base64
 import json
 import os
 import queue
+import re
 import shutil
 import socket
 import sys
@@ -35,7 +36,7 @@ from pymavlink.dialects.v10 import ardupilotmega as _dialect_v10  # noqa: E402,F
 from pymavlink.dialects.v20 import ardupilotmega as _dialect_v20  # noqa: E402,F401
 
 APP_NAME = "Servo Trim Sync"
-APP_VERSION = "1.7"
+APP_VERSION = "1.8"
 CONFIG_DIR = Path(os.environ.get("APPDATA", tempfile.gettempdir())) / "ServoTrimSync"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 AUTO_SOURCE = "auto"
@@ -140,6 +141,120 @@ def channel_rules(channel, below, above, low=800, high=2200, mode=MODE_OFFSETS):
     ]
 
 
+# ---- Перевірки налаштувань (лише читання й звірка) -------------------------------------------
+# Назви значень SERVOn_FUNCTION і SERIALn_PROTOCOL з документації ArduPilot.
+SERVO_FUNCTIONS = {
+    -1: "GPIO", 0: "Disabled", 1: "RCPassThru", 2: "Flap", 3: "FlapAuto", 4: "Aileron", 6: "MountPan",
+    7: "MountTilt", 8: "MountRoll", 9: "MountOpen", 10: "CameraTrigger", 12: "Mount2Pan", 13: "Mount2Tilt",
+    14: "Mount2Roll", 15: "Mount2Open", 16: "DiffSpoilerLeft1", 17: "DiffSpoilerRight1", 19: "Elevator",
+    21: "Rudder", 22: "SprayerPump", 23: "SprayerSpinner", 24: "FlaperonLeft", 25: "FlaperonRight",
+    26: "GroundSteering", 27: "Parachute", 28: "Gripper", 29: "LandingGear", 30: "EngineRunEnable",
+    31: "HeliRSC", 32: "HeliTailRSC", **{32 + n: f"Motor{n}" for n in range(1, 9)}, 41: "TiltMotorsFront",
+    45: "TiltMotorsRearLeft", 46: "TiltMotorsRearRight", **{50 + n: f"RCIN{n}" for n in range(1, 17)},
+    67: "Ignition", 69: "Starter", 70: "Throttle", 73: "ThrottleLeft", 74: "ThrottleRight",
+    75: "TiltMotorFrontLeft", 76: "TiltMotorFrontRight", 77: "ElevonLeft", 78: "ElevonRight", 79: "VTailLeft",
+    80: "VTailRight", 81: "BoostThrottle", **{73 + n: f"Motor{n}" for n in range(9, 13)},
+    86: "DiffSpoilerLeft2", 87: "DiffSpoilerRight2", 88: "Winch", 89: "MainSail", 90: "CameraISO",
+    91: "CameraAperture", 92: "CameraFocus", 93: "CameraShutterSpeed", **{93 + n: f"Script{n}" for n in range(1, 17)},
+    120: "NeoPixel1", 121: "NeoPixel2", 122: "NeoPixel3", 123: "NeoPixel4", 124: "RateRoll", 125: "RatePitch",
+    126: "RateThrust", 127: "RateYaw", 129: "ProfiLED1", 130: "ProfiLED2", 131: "ProfiLED3",
+    132: "ProfiLEDClock", 133: "WinchClutch", 134: "SERVOn_MIN", 135: "SERVOn_TRIM", 136: "SERVOn_MAX",
+    137: "SailMastRotation", **{139 + n: f"RCIN{n}Scaled" for n in range(1, 17)},
+    156: "LightsBrightness",
+}
+SERIAL_PROTOCOLS = {
+    -1: "None", 1: "MAVLink1", 2: "MAVLink2", 3: "Frsky D", 4: "Frsky SPort", 5: "GPS", 7: "Alexmos Gimbal",
+    8: "Gimbal", 9: "Rangefinder", 10: "FrSky SPort Passthrough", 11: "Lidar360", 13: "Beacon", 14: "Volz servo",
+    15: "SBus servo", 16: "ESC Telemetry", 17: "Devo Telemetry", 18: "OpticalFlow", 19: "RobotisServo",
+    20: "NMEA Output", 21: "WindVane", 22: "SLCAN", 23: "RCIN", 24: "EFI Serial", 25: "LTM", 26: "RunCam",
+    27: "HottTelem", 28: "Scripting", 29: "Crossfire VTX", 30: "Generator", 31: "Winch", 32: "MSP",
+    33: "DJI FPV", 34: "AirSpeed", 35: "ADSB", 36: "AHRS", 37: "SmartAudio", 38: "FETtecOneWire",
+    39: "Torqeedo", 40: "AIS", 41: "CoDevESC", 42: "DisplayPort", 43: "MAVLink High Latency", 44: "IRC Tramp",
+    45: "DDS XRCE", 46: "IMUDATA",
+}
+TUNING_PARAMS = (
+    "RLL_RATE_P", "RLL_RATE_I", "RLL_RATE_D", "RLL_RATE_FF", "RLL_RATE_IMAX",
+    "PTCH_RATE_P", "PTCH_RATE_I", "PTCH_RATE_D", "PTCH_RATE_FF", "PTCH_RATE_IMAX",
+    "YAW_RATE_P", "YAW_RATE_I", "YAW_RATE_D", "YAW_RATE_FF",
+    "RLL2SRV_TCONST", "RLL2SRV_RMAX", "PTCH2SRV_TCONST", "PTCH2SRV_RMAX_UP", "PTCH2SRV_RMAX_DN",
+    "YAW2SRV_DAMP", "YAW2SRV_INT", "YAW2SRV_RLL", "NAVL1_PERIOD", "NAVL1_DAMPING",
+    "ATC_RAT_RLL_P", "ATC_RAT_RLL_I", "ATC_RAT_RLL_D", "ATC_RAT_RLL_FF",
+    "ATC_RAT_PIT_P", "ATC_RAT_PIT_I", "ATC_RAT_PIT_D", "ATC_RAT_PIT_FF",
+    "ATC_RAT_YAW_P", "ATC_RAT_YAW_I", "ATC_RAT_YAW_D", "ATC_RAT_YAW_FF",
+    "ATC_ANG_RLL_P", "ATC_ANG_PIT_P", "ATC_ANG_YAW_P",
+)
+CHECK_GROUPS = (
+    ("servo", "Servo Output", "FUNCTION виходів"),
+    ("serial", "Serial Ports", "PROTOCOL портів"),
+    ("tuning", "Basic Tuning", "PID і налаштування"),
+    ("custom", "Інше", "будь-які параметри"),
+)
+CHECK_PARAM_RE = re.compile(r"^[A-Z0-9_]{1,16}$")
+CHECK_MISSING_S = 12.0   # не відповів стільки після підключення — параметра, певно, немає
+
+
+def check_suggestions(group):
+    if group == "servo":
+        return [f"SERVO{n}_FUNCTION" for n in range(1, 17)]
+    if group == "serial":
+        return [f"SERIAL{n}_PROTOCOL" for n in range(0, 9)]
+    if group == "tuning":
+        return list(TUNING_PARAMS)
+    return []
+
+
+def check_choices(group):
+    table = SERVO_FUNCTIONS if group == "servo" else SERIAL_PROTOCOLS if group == "serial" else None
+    return [f"{value} — {name}" for value, name in sorted(table.items())] if table else []
+
+
+def value_label(group, value):
+    """Число → «70 — Throttle» для FUNCTION/PROTOCOL, інакше просто число."""
+    if value is None:
+        return "—"
+    table = SERVO_FUNCTIONS if group == "servo" else SERIAL_PROTOCOLS if group == "serial" else None
+    number = float(value)
+    if table is not None and number.is_integer() and int(number) in table:
+        return f"{int(number)} — {table[int(number)]}"
+    return f"{number:g}"
+
+
+def parse_number(text):
+    """«70 — Throttle» → 70.0; «0,15» → 0.15; порожньо/не число → None."""
+    match = re.match(r"\s*([-+]?\d+(?:[.,]\d+)?)", str(text or ""))
+    return float(match.group(1).replace(",", ".")) if match else None
+
+
+def clean_checks(items):
+    checks = []
+    for item in items if isinstance(items, list) else []:
+        try:
+            param = str(item.get("param", "")).strip().upper()
+            group = item.get("group") if item.get("group") in {g[0] for g in CHECK_GROUPS} else "custom"
+            expected = str(item.get("expected", "")).strip()
+            tolerance = str(item.get("tolerance", "0")).strip() or "0"
+        except AttributeError:
+            continue
+        if CHECK_PARAM_RE.match(param) and parse_number(expected) is not None:
+            checks.append({"group": group, "param": param, "expected": expected, "tolerance": tolerance})
+    return checks
+
+
+def parse_param_file(text):
+    """Файл параметрів Mission Planner (.param): «NAME,VALUE» або «NAME VALUE» у кожному рядку."""
+    values = {}
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        parts = re.split(r"[,\s\t]+", line)
+        if len(parts) >= 2 and CHECK_PARAM_RE.match(parts[0].upper()):
+            number = parse_number(parts[1])
+            if number is not None:
+                values[parts[0].upper()] = number
+    return values
+
+
 DEFAULT_CONFIG = {
     "config_version": CONFIG_VERSION,
     "connection": AUTO_SOURCE,
@@ -157,6 +272,7 @@ DEFAULT_CONFIG = {
     "geometry": "",
     "overlay": False,
     "overlay_pos": "",
+    "checks": [],
 }
 
 
@@ -201,6 +317,7 @@ def load_config():
                 output["mode"] = MODE_OFFSETS
             outputs.append(output)
         config["outputs"] = outputs
+        config["checks"] = clean_checks(config.get("checks"))
         if int(data.get("config_version", 1)) < CONFIG_VERSION:
             # Старі версії підключалися лише через MAVLink Mirror — тепер «Автоматично».
             if config["connection"] in ("udpin:0.0.0.0:14551", "udpin:0.0.0.0:14550", ""):
@@ -360,6 +477,7 @@ class MavWorker(threading.Thread):
         self.pending = {}
         self.param_types = {}
         self.deferred = {}
+        self.watch = set()
 
     # ---- службове ---------------------------------------------------------------------
     def emit(self, *event):
@@ -399,6 +517,9 @@ class MavWorker(threading.Thread):
             self.log("Відключено")
         elif kind == "rules":
             self.rules, self.only_disarmed = command[1], command[2]
+            self._request_sources()
+        elif kind == "watch":
+            self.watch = set(command[1])
             self._request_sources()
         elif kind == "apply_all":
             self._apply_all(command[1] if len(command) > 1 else None, command[2] if len(command) > 2 else False)
@@ -628,7 +749,8 @@ class MavWorker(threading.Thread):
         self.last_refresh = time.monotonic()
         names = {source for rule in self.rules if rule["enabled"] for source in rule["sources"]}
         names |= {rule["target"] for rule in self.rules if rule["enabled"]}
-        names &= WRITABLE_PARAMS  # читаємо лише свої параметри SERVO
+        names &= WRITABLE_PARAMS  # свої параметри SERVO
+        names |= self.watch       # параметри для перевірок — ЛИШЕ читання, у запис не потрапляють ніколи
         for name in sorted(names):
             self.master.mav.param_request_read_send(self.target[0], self.target[1], name.encode(), -1)
 
@@ -963,6 +1085,18 @@ class MiniMonitor(tk.Toplevel):
         self.close_button.pack(side="right")
         self.table = tk.Frame(self.body, bg=SURFACE)
         self.table.pack(fill="x", pady=(6, 0))
+        self.checks_line = tk.Frame(self.body, bg=SURFACE)
+        tk.Frame(self.checks_line, bg=LINE, height=1).pack(fill="x", pady=(7, 5))
+        line = tk.Frame(self.checks_line, bg=SURFACE)
+        line.pack(fill="x")
+        caption = tk.Label(line, text="НАЛАШТУВАННЯ", bg=SURFACE, fg=FAINT, font=(FONT, 7, "bold"))
+        caption.pack(side="left")
+        self.checks_label = tk.Label(line, text="", bg=SURFACE, fg=FAINT, font=app.font_strong, cursor="hand2")
+        self.checks_label.pack(side="right")
+        self.checks_tip = Tip(self.checks_label, "")
+        for widget in (self.checks_line, line, caption):
+            self._bind_drag(widget)
+        self.checks_label.bind("<Button-1>", lambda _e: app._open_checks())
         for widget in (self, self.body, head, self.dot, self.caption, self.table):
             self._bind_drag(widget)
         position = str(app.config_data.get("overlay_pos") or "")
@@ -1020,7 +1154,14 @@ class MiniMonitor(tk.Toplevel):
                 self._bind_drag(widget)
             self.cells[state["index"]] = (strip, name, values)
 
-    def show(self, states, link_color):
+    def show(self, states, link_color, checks=None):
+        if checks is None:
+            self.checks_line.pack_forget()
+        else:
+            _state, text, color, details = checks
+            self.checks_label.configure(text=text, fg=color)
+            self.checks_tip.text = details
+            self.checks_line.pack(fill="x")
         signature = tuple((state["index"], state["name"]) for state in states)
         if signature != self.signature:
             self.signature = signature
@@ -1033,6 +1174,295 @@ class MiniMonitor(tk.Toplevel):
             strip.configure(bg=color)
             for label, value in zip(values, (state["min"], state["trim"], state["max"])):
                 label.configure(text="—" if value is None else f"{value:g}", fg=color)
+
+
+class ChecksWindow(tk.Toplevel):
+    """Перевірки налаштувань: що має стояти в політнику → що стоїть насправді. Лише читання."""
+
+    def __init__(self, app):
+        super().__init__(app, bg=BG)
+        self.app = app
+        self.title("Перевірки налаштувань")
+        self.resizable(False, False)
+        self.group = "servo"
+        self.rows = {group: [] for group, _title, _hint in CHECK_GROUPS}
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        body = tk.Frame(self, bg=BG, padx=18, pady=14)
+        body.pack(fill="both", expand=True)
+
+        top = tk.Frame(body, bg=BG)
+        top.pack(fill="x")
+        titles = tk.Frame(top, bg=BG)
+        titles.pack(side="left")
+        tk.Label(titles, text="Перевірки налаштувань", bg=BG, fg=TEXT, font=app.font_title).pack(anchor="w")
+        tk.Label(titles, text="Лише читання й звірка — у політнику нічого не змінюється", bg=BG, fg=MUTED,
+                 font=(FONT, 9)).pack(anchor="w")
+        self.summary = tk.Label(top, text="", bg=BG, fg=MUTED, font=app.font_strong)
+        self.summary.pack(side="right")
+
+        tabs = tk.Frame(body, bg=BG)
+        tabs.pack(fill="x", pady=(14, 8))
+        self.tab_buttons = {}
+        for group, title, hint in CHECK_GROUPS:
+            button = FlatButton(tabs, title, lambda g=group: self._show_group(g), font=(FONT, 9, "bold"),
+                                padx=12, pady=5, tip=hint)
+            button.pack(side="left", padx=(0, 4))
+            self.tab_buttons[group] = button
+
+        header = tk.Frame(body, bg=BG, padx=1)
+        header.pack(fill="x")
+        self._columns(header)
+        for column, text in enumerate(("ПАРАМЕТР", "МАЄ БУТИ", "ДОПУСК", "У ПОЛІТНИКУ", "")):
+            tk.Label(header, text=text, bg=BG, fg=FAINT, font=(FONT, 8, "bold"), anchor="w").grid(
+                row=0, column=column, sticky="w", pady=(0, 4))
+
+        holder = tk.Frame(body, bg=BG, highlightthickness=1, highlightbackground=LINE)
+        holder.pack(fill="both", expand=True)
+        self.canvas = tk.Canvas(holder, bg=BG, highlightthickness=0, height=330, width=760)
+        scroll = ttk.Scrollbar(holder, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=scroll.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.frames = {}
+        for group, _title, _hint in CHECK_GROUPS:
+            frame = tk.Frame(self.canvas, bg=BG)
+            self.frames[group] = frame
+        self.window_id = self.canvas.create_window(0, 0, anchor="nw", window=self.frames["servo"])
+        self.canvas.bind("<Configure>", lambda _e: self._sync_scroll())
+        self.bind_all("<MouseWheel>", self._wheel, add="+")
+
+        actions = tk.Frame(body, bg=BG)
+        actions.pack(fill="x", pady=(10, 0))
+        FlatButton(actions, "+ Додати", self._add_row, padx=12, pady=5, bg=SURFACE, fg=ACCENT,
+                   font=app.font_strong).pack(side="left")
+        FlatButton(actions, "Взяти з політника", self._take_current, padx=12, pady=5, bg=SURFACE,
+                   tip="Записати поточні значення з політника як еталон\n(для всіх рядків; у політнику нічого "
+                       "не змінюється)").pack(side="left", padx=(6, 0))
+        FlatButton(actions, "З .param файлу…", self._from_param_file, padx=12, pady=5, bg=SURFACE,
+                   tip="Взяти еталон з файлу параметрів Mission Planner\n(Config → Full Parameter List → Save)"
+                   ).pack(side="left", padx=(6, 0))
+        FlatButton(actions, "Експорт конфігу…", lambda: app._export_config(self), padx=12, pady=5,
+                   bg=SURFACE, tip="Зберегти назви серв, режими, відступи й перевірки у файл").pack(side="right")
+        FlatButton(actions, "Імпорт конфігу…", self._import, padx=12, pady=5, bg=SURFACE,
+                   tip="Завантажити конфіг з файлу").pack(side="right", padx=(0, 6))
+
+        bottom = tk.Frame(body, bg=BG)
+        bottom.pack(fill="x", pady=(14, 0))
+        self.hint = tk.Label(bottom, text="", bg=BG, fg=MUTED, font=(FONT, 9), anchor="w")
+        self.hint.pack(side="left")
+        FlatButton(bottom, "Зберегти", self._save, padx=16, pady=6, bg=SURFACE, fg=ACCENT,
+                   font=app.font_strong).pack(side="right")
+        FlatButton(bottom, "Закрити", self._close, padx=12, pady=6, bg=SURFACE).pack(side="right", padx=(0, 6))
+
+        self._load(app.config_data["checks"])
+        self._show_group("servo")
+        self.update_live()
+        app.update_idletasks()
+        self.geometry(f"+{app.winfo_rootx() + 30}+{app.winfo_rooty() + 30}")
+        self.after(10, lambda: dark_title_bar(self))
+
+    CHECK_COLUMNS = (200, 238, 74, 226, 30)
+
+    def _columns(self, frame):
+        for column, width in enumerate(self.CHECK_COLUMNS):
+            frame.columnconfigure(column, minsize=width)
+
+    # ---- рядки ---------------------------------------------------------------------------
+    def _load(self, checks):
+        for group in self.rows:
+            for row in self.rows[group]:
+                row["frame"].destroy()
+            self.rows[group] = []
+        for check in checks:
+            self._add_row(check["group"], check)
+        self._sync_scroll()
+
+    def _add_row(self, group=None, check=None):
+        group = group or self.group
+        frame = tk.Frame(self.frames[group], bg=BG, pady=3)
+        frame.pack(fill="x")
+        self._columns(frame)
+        row = {"group": group, "frame": frame}
+        row["param"] = tk.StringVar(value=(check or {}).get("param", ""))
+        row["expected"] = tk.StringVar(value=(check or {}).get("expected", ""))
+        row["tolerance"] = tk.StringVar(value=(check or {}).get("tolerance", "0"))
+        if check is None and group in ("servo", "serial"):
+            used = {r["param"].get() for r in self.rows[group]}
+            free = [name for name in check_suggestions(group) if name not in used]
+            row["param"].set(free[0] if free else "")
+        param = ttk.Combobox(frame, textvariable=row["param"], values=check_suggestions(group), width=20)
+        param.grid(row=0, column=0, sticky="w")
+        expected = ttk.Combobox(frame, textvariable=row["expected"], values=check_choices(group), width=24)
+        expected.grid(row=0, column=1, sticky="w")
+        tolerance = ttk.Entry(frame, textvariable=row["tolerance"], width=7)
+        tolerance.grid(row=0, column=2, sticky="w")
+        if group in ("servo", "serial"):
+            tolerance.state(["disabled"])
+        row["current"] = tk.Label(frame, text="—", bg=BG, fg=FAINT, font=self.app.font_strong, anchor="w")
+        row["current"].grid(row=0, column=3, sticky="w")
+        FlatButton(frame, "×", lambda: self._remove_row(row), padx=6, pady=0, fg=FAINT,
+                   tip="Прибрати перевірку").grid(row=0, column=4)
+        for variable in (row["param"], row["expected"], row["tolerance"]):
+            variable.trace_add("write", lambda *_a: self.update_live())
+        self.rows[group].append(row)
+        self._sync_scroll()
+        self.update_live()
+        return row
+
+    def _remove_row(self, row):
+        row["frame"].destroy()
+        self.rows[row["group"]].remove(row)
+        self._sync_scroll()
+        self.update_live()
+
+    def _collect(self):
+        checks = []
+        for group, _title, _hint in CHECK_GROUPS:
+            for row in self.rows[group]:
+                checks.append({"group": group, "param": row["param"].get().strip().upper(),
+                               "expected": row["expected"].get().strip(),
+                               "tolerance": row["tolerance"].get().strip() or "0"})
+        return checks
+
+    # ---- вкладки й прокрутка ---------------------------------------------------------------
+    def _show_group(self, group):
+        self.group = group
+        self.canvas.itemconfigure(self.window_id, window=self.frames[group])
+        for key, button in self.tab_buttons.items():
+            count = len(self.rows[key])
+            title = next(title for g, title, _hint in CHECK_GROUPS if g == key)
+            button.configure(text=f"{title} · {count}" if count else title)
+            button.set_style(bg=RAISED if key == group else BG, fg=TEXT if key == group else MUTED)
+        self.canvas.yview_moveto(0)
+        self._sync_scroll()
+
+    def _sync_scroll(self):
+        frame = self.frames[self.group]
+        frame.update_idletasks()
+        self.canvas.configure(scrollregion=(0, 0, frame.winfo_reqwidth(), frame.winfo_reqheight()))
+
+    def _wheel(self, event):
+        try:
+            if str(event.widget).startswith(str(self)):
+                self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        except tk.TclError:
+            pass
+
+    # ---- живі значення -----------------------------------------------------------------------
+    def update_live(self):
+        app = self.app
+        late = app.link_ok and time.monotonic() - app.link_since > CHECK_MISSING_S
+        bad = ok = 0
+        for group, _title, _hint in CHECK_GROUPS:
+            for row in self.rows[group]:
+                param = row["param"].get().strip().upper()
+                expected = parse_number(row["expected"].get())
+                tolerance = abs(parse_number(row["tolerance"].get()) or 0.0)
+                value = app.params.get(param)
+                if not param or expected is None:
+                    text, color = "заповніть параметр і значення", WARN
+                elif not app.link_ok:
+                    text, color = "немає зв'язку", FAINT
+                elif value is None:
+                    text, color = ("✕ немає такого параметра?" if late else "читаю…"), (ERR if late else FAINT)
+                    bad += late
+                elif abs(value - expected) <= tolerance + 1e-6:
+                    text, color = f"✓ {value_label(group, value)}", OK
+                    ok += 1
+                else:
+                    text, color = f"✕ {value_label(group, value)}", ERR
+                    bad += 1
+                row["current"].configure(text=text, fg=color)
+        total = sum(len(rows) for rows in self.rows.values())
+        if not total:
+            self.summary.configure(text="Перевірок ще немає", fg=MUTED)
+        elif bad:
+            self.summary.configure(text=f"Щось не так: {bad}", fg=ERR)
+        elif ok == total:
+            self.summary.configure(text="✓ Налаштування OK", fg=OK)
+        else:
+            self.summary.configure(text=f"Перевірено {ok} з {total}", fg=MUTED)
+        dirty = clean_checks(self._collect()) != self.app.config_data["checks"]
+        self.hint.configure(text="Є незбережені зміни" if dirty else "", fg=WARN)
+        for key, button in self.tab_buttons.items():
+            count = len(self.rows[key])
+            title = next(title for g, title, _hint in CHECK_GROUPS if g == key)
+            button.configure(text=f"{title} · {count}" if count else title)
+
+    # ---- дії -----------------------------------------------------------------------------------
+    def _take_current(self):
+        rows = [row for rows in self.rows.values() for row in rows
+                if self.app.params.get(row["param"].get().strip().upper()) is not None]
+        if not rows:
+            messagebox.showinfo(APP_NAME, "Немає прочитаних значень — підключіться до політника\n"
+                                "й додайте рядки з параметрами.", parent=self)
+            return
+        if not messagebox.askyesno(APP_NAME, f"Записати поточні значення з політника як еталон для {len(rows)} "
+                                   "рядків?\n\n(Змінюється лише конфіг програми, політник — ні.)", parent=self):
+            return
+        for row in rows:
+            value = self.app.params[row["param"].get().strip().upper()]
+            row["expected"].set(value_label(row["group"], value))
+        self.update_live()
+
+    def _from_param_file(self):
+        path = filedialog.askopenfilename(parent=self, title="Файл параметрів Mission Planner",
+                                          filetypes=[("Параметри", "*.param *.parm *.txt"), ("Усі файли", "*.*")])
+        if not path:
+            return
+        try:
+            values = parse_param_file(Path(path).read_text(encoding="utf-8", errors="replace"))
+        except OSError as exc:
+            messagebox.showerror(APP_NAME, str(exc), parent=self)
+            return
+        patterns = {"servo": re.compile(r"^SERVO\d{1,2}_FUNCTION$"), "serial": re.compile(r"^SERIAL\d_PROTOCOL$"),
+                    "tuning": re.compile("^(" + "|".join(TUNING_PARAMS) + ")$")}
+        updated = added = 0
+        existing = {row["param"].get().strip().upper(): row for rows in self.rows.values() for row in rows}
+        for name, value in values.items():
+            if name in existing:
+                row = existing[name]
+                row["expected"].set(value_label(row["group"], value))
+                updated += 1
+                continue
+            group = next((g for g, pattern in patterns.items() if pattern.match(name)), None)
+            if group:
+                self._add_row(group, {"param": name, "expected": value_label(group, value), "tolerance": "0"})
+                added += 1
+        self._show_group(self.group)
+        messagebox.showinfo(APP_NAME, f"З файлу: оновлено {updated}, додано {added} перевірок\n"
+                            "(FUNCTION, PROTOCOL і PID). Перегляньте й натисніть «Зберегти».", parent=self)
+
+    def _import(self):
+        if self.app._import_config(self):
+            self._load(self.app.config_data["checks"])
+            self._show_group(self.group)
+
+    def _save(self):
+        checks = self._collect()
+        broken = [c["param"] or "(порожньо)" for c in checks
+                  if not CHECK_PARAM_RE.match(c["param"]) or parse_number(c["expected"]) is None]
+        if broken:
+            messagebox.showerror(APP_NAME, "Заповніть правильно (назва параметра й число):\n" + ", ".join(broken[:8]),
+                                 parent=self)
+            return
+        self.app._set_checks(checks)
+        self.app._log(f"Перевірки збережено: {len(checks)}", "ok")
+        self.update_live()
+
+    def _close(self):
+        if clean_checks(self._collect()) != self.app.config_data["checks"]:
+            answer = messagebox.askyesnocancel(APP_NAME, "Зберегти зміни в перевірках?", parent=self)
+            if answer is None:
+                return
+            if answer:
+                self._save()
+        try:
+            self.unbind_all("<MouseWheel>")
+        except tk.TclError:
+            pass
+        self.app.checks_window = None
+        self.destroy()
 
 
 class App(tk.Tk):
@@ -1060,6 +1490,9 @@ class App(tk.Tk):
         self.overlay = None
         self.mp_copies = 0
         self.next_mp_check = 0.0
+        self.link_since = 0.0
+        self.next_checks_ui = 0.0
+        self.checks_window = None
         self._load_images()
         self._style()
         self._build()
@@ -1068,6 +1501,7 @@ class App(tk.Tk):
         if geometry.startswith("+"):
             self.geometry(geometry)
         self._send_rules()
+        self._send_watch()
         self._refresh_values()
         self.after(10, lambda: dark_title_bar(self))
         if self.config_data.get("overlay"):
@@ -1147,6 +1581,10 @@ class App(tk.Tk):
                                              "хоч як він підключений (USB, COM, радіо, UDP, TCP).\n"
                                              "У Mission Planner нічого вмикати не треба.")
         self.connect_button.pack(side="right", padx=(0, 6))
+        self.checks_button = FlatButton(head, "Перевірки", self._open_checks, font=self.font_strong, padx=12,
+                                        pady=5, bg=SURFACE, hover_bg=RAISED, fg=MUTED,
+                                        tip="Перевірка налаштувань політника (лише читання)")
+        self.checks_button.pack(side="right", padx=(0, 6))
         self.armed_label = self._label(head, "", ERR, (FONT, 9, "bold"))
         self.armed_label.pack(side="right", padx=(0, 10))
         self._line(self)
@@ -1375,6 +1813,76 @@ class App(tk.Tk):
     def _update_overlay(self):
         if self.overlay is None:
             return
+        try:
+            self.overlay.show(*self._overlay_args())
+        except tk.TclError:
+            self.overlay = None
+
+    def _send_watch(self):
+        names = sorted({check["param"] for check in self.config_data["checks"]})
+        self.worker.commands.put(("watch", names))
+
+    def _check_results(self):
+        """[(перевірка, поточне значення, стан)]; стан: ok · bad · missing · unknown."""
+        results = []
+        for check in self.config_data["checks"]:
+            value = self.params.get(check["param"])
+            expected = parse_number(check["expected"])
+            tolerance = abs(parse_number(check["tolerance"]) or 0.0)
+            if value is None:
+                late = self.link_ok and time.monotonic() - self.link_since > CHECK_MISSING_S
+                status = "missing" if late else "unknown"
+            else:
+                status = "ok" if abs(value - expected) <= tolerance + 1e-6 else "bad"
+            results.append((check, value, status))
+        return results
+
+    def _checks_summary(self):
+        """(стан, текст, колір, подробиці) або None, якщо перевірок немає."""
+        results = self._check_results()
+        if not results:
+            return None
+        problems = []
+        for check, value, status in results:
+            if status == "bad":
+                problems.append(f"✕ {check['param']}: {value_label(check['group'], value)}"
+                                f" (має бути {value_label(check['group'], parse_number(check['expected']))})")
+            elif status == "missing":
+                problems.append(f"? {check['param']}: політник не відповідає (немає такого параметра?)")
+        if not self.link_ok:
+            return "none", "немає зв'язку", FAINT, "Перевірка почнеться після підключення"
+        if problems:
+            details = "\n".join(problems[:12]) + (f"\n…і ще {len(problems) - 12}" if len(problems) > 12 else "")
+            return "bad", f"Щось не так ({len(problems)})", ERR, details
+        if any(status == "unknown" for _c, _v, status in results):
+            return "wait", "перевіряю…", MUTED, "Читаю параметри з політника"
+        return "ok", "OK", OK, f"Усі {len(results)} перевірок збігаються"
+
+    def _update_checks_ui(self):
+        summary = self._checks_summary()
+        if summary is None:
+            self.checks_button.configure(text="Перевірки")
+            self.checks_button.set_style(fg=MUTED)
+            self.checks_button.tip.text = "Перевірка налаштувань політника (лише читання)\nНаразі перевірок немає"
+        else:
+            state, text, color, details = summary
+            label = {"ok": "✓ Налаштування OK", "bad": f"✕ {text}", "wait": "Перевіряю…",
+                     "none": "Перевірки"}[state]
+            self.checks_button.configure(text=label)
+            self.checks_button.set_style(fg=color)
+            self.checks_button.tip.text = details
+        if self.overlay is not None:
+            try:
+                self.overlay.show(*self._overlay_args())
+            except tk.TclError:
+                self.overlay = None
+        if self.checks_window is not None:
+            try:
+                self.checks_window.update_live()
+            except tk.TclError:
+                self.checks_window = None
+
+    def _overlay_args(self):
         states = []
         for index, output in enumerate(self.config_data["outputs"]):
             if not output["enabled"]:
@@ -1383,10 +1891,93 @@ class App(tk.Tk):
             states.append({"index": index, "name": output.get("name") or f"SERVO {output['channel']}",
                            "min": current_min, "trim": trim, "max": current_max, "status": status})
         link_color = OK if self.link_ok else (WARN if self.connected_request else FAINT)
+        return states, link_color, self._checks_summary()
+
+    def _open_checks(self):
+        if self.checks_window is not None:
+            try:
+                self.checks_window.deiconify()
+                self.checks_window.lift()
+                return
+            except tk.TclError:
+                self.checks_window = None
+        self.checks_window = ChecksWindow(self)
+
+    def _set_checks(self, checks):
+        self.config_data["checks"] = clean_checks(checks)
+        self._send_watch()
+        self._update_checks_ui()
+        self._save_now()
+
+    # ---- конфіг: експорт / імпорт ---------------------------------------------------------
+    EXPORT_KEYS = ("outputs", "checks", "low", "high", "only_disarmed", "auto", "step")
+
+    def _export_config(self, parent):
+        path = filedialog.asksaveasfilename(
+            parent=parent, title="Експорт конфігу Servo Trim Sync", defaultextension=".json",
+            initialfile="servo_trim_sync_config.json", filetypes=[("Конфіг Servo Trim Sync", "*.json")])
+        if not path:
+            return
+        data = {"app": APP_NAME, "format": 1, "version": APP_VERSION}
+        data.update({key: self.config_data[key] for key in self.EXPORT_KEYS})
         try:
-            self.overlay.show(states, link_color)
-        except tk.TclError:
-            self.overlay = None
+            Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError as exc:
+            messagebox.showerror(APP_NAME, f"Не вдалося зберегти:\n{exc}", parent=parent)
+            return
+        self._log(f"Конфіг експортовано: {path}", "ok")
+        messagebox.showinfo(APP_NAME, "Конфіг збережено.\nНазви серв, режими, відступи й перевірки — у файлі.",
+                            parent=parent)
+
+    def _import_config(self, parent):
+        path = filedialog.askopenfilename(parent=parent, title="Імпорт конфігу Servo Trim Sync",
+                                          filetypes=[("Конфіг Servo Trim Sync", "*.json"), ("Усі файли", "*.*")])
+        if not path:
+            return False
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or "outputs" not in data:
+                raise ValueError("це не конфіг Servo Trim Sync")
+            low, high = int(data.get("low", 800)), int(data.get("high", 2200))
+            if not 500 <= low < high <= 2500:
+                raise ValueError("неправильні межі PWM")
+        except (OSError, ValueError, TypeError) as exc:
+            messagebox.showerror(APP_NAME, f"Не вдалося прочитати конфіг:\n{exc}", parent=parent)
+            return False
+        saved = {}
+        for output in data.get("outputs") or []:
+            try:
+                saved[int(output["channel"])] = output
+            except (KeyError, TypeError, ValueError):
+                continue
+        outputs = []
+        for current in self.config_data["outputs"]:
+            item = saved.get(current["channel"], {})
+            outputs.append({
+                "channel": current["channel"],
+                "enabled": bool(item.get("enabled", current["enabled"])),
+                "below": int(max(0, min(1000, int(item.get("below", current["below"]))))),
+                "above": int(max(0, min(1000, int(item.get("above", current["above"]))))),
+                "name": str(item.get("name", current.get("name", "")))[:24],
+                "mode": item.get("mode") if item.get("mode") in (MODE_OFFSETS, MODE_MIDDLE) else current["mode"],
+            })
+        if not messagebox.askyesno(
+                APP_NAME, f"Завантажити конфіг «{Path(path).name}»?\n\nЗамінить назви серв, режими, відступи "
+                          "й перевірки.\nЯкщо «Авто» увімкнено, MIN/MAX/TRIM вибраних SERVO6–10 будуть "
+                          "вирівняні за новими відступами.", parent=parent):
+            return False
+        self.config_data.update({"outputs": outputs, "checks": clean_checks(data.get("checks")),
+                                 "low": low, "high": high,
+                                 "only_disarmed": bool(data.get("only_disarmed", self.config_data["only_disarmed"])),
+                                 "auto": bool(data.get("auto", self.config_data["auto"])),
+                                 "step": data.get("step") if data.get("step") in STEPS else self.config_data["step"]})
+        self._save_now()
+        self._send_rules()
+        self._send_watch()
+        self._update_controls()
+        self._refresh_values()
+        self._log(f"Конфіг завантажено: {path}", "ok")
+        return True
 
     def _toggle_log(self):
         self.config_data["show_log"] = not self.config_data["show_log"]
@@ -1688,6 +2279,7 @@ class App(tk.Tk):
                                                  for kind in ("MIN", "MAX"))
                 self._set_state(row, need, ERR)
         self._update_overlay()
+        self._update_checks_ui()
         if not self.link_ok:
             waiting = self.connected_request
             summary, color = (self.link_text, WARN) if waiting else ("Не підключено", FAINT)
@@ -1825,6 +2417,16 @@ class App(tk.Tk):
                 self.worker.commands.put(("connect", self.config_data["connection"], self.config_data["baud"]))
             window.destroy()
 
+        section(19, "ПЕРЕВІРКИ ТА КОНФІГ")
+        checks_row = tk.Frame(body, bg=BG)
+        checks_row.grid(row=20, column=0, columnspan=4, sticky="ew", pady=3)
+        count = len(self.config_data["checks"])
+        self._label(checks_row, f"Перевірок налаштувань: {count}. Лише читання й звірка —\n"
+                                "програма нічого не змінює в політнику.", MUTED, (FONT, 9), justify="left",
+                    anchor="w").pack(side="left", fill="x", expand=True)
+        FlatButton(checks_row, "Відкрити", lambda: (window.destroy(), self._open_checks()), padx=12, pady=5,
+                   bg=SURFACE, fg=ACCENT, font=self.font_strong).pack(side="right")
+
         section(16, "MISSION PLANNER")
         plugin_row = tk.Frame(body, bg=BG)
         plugin_row.grid(row=17, column=0, columnspan=4, sticky="ew", pady=3)
@@ -1870,7 +2472,7 @@ class App(tk.Tk):
         window.after(2000, keep_refreshing)
 
         buttons = tk.Frame(body, bg=BG)
-        buttons.grid(row=18, column=0, columnspan=4, sticky="e", pady=(16, 0))
+        buttons.grid(row=21, column=0, columnspan=4, sticky="e", pady=(16, 0))
         FlatButton(buttons, "Скасувати", window.destroy, padx=12, pady=6, bg=SURFACE).pack(side="left", padx=6)
         FlatButton(buttons, "Зберегти", save, padx=14, pady=6, bg=SURFACE, fg=ACCENT,
                    font=self.font_strong).pack(side="left")
@@ -1991,6 +2593,8 @@ class App(tk.Tk):
                 if kind == "log":
                     self._log(event[1], event[2])
                 elif kind == "link":
+                    if event[1] and not self.link_ok:
+                        self.link_since = time.monotonic()
                     self.link_ok, self.link_text = event[1], event[2]
                     if not event[1]:
                         self.armed_label.configure(text="")
@@ -2005,6 +2609,9 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         now = time.monotonic()
+        if self.config_data["checks"] and now >= self.next_checks_ui:
+            self.next_checks_ui = now + 1.0
+            self._update_checks_ui()
         if os.name == "nt" and self.connected_request and not self.link_ok and now >= self.next_mp_check:
             # Дві копії MP (стара «зависла» після перезапуску) — частa причина, чому даних немає.
             self.next_mp_check = now + 5.0
