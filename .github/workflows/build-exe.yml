@@ -18,7 +18,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: python -m pip install pyinstaller pillow qrcode python-barcode numpy==1.26.4 opencv-python-headless==4.9.0.80
+        run: python -m pip install pyinstaller pillow qrcode python-barcode
 
       - name: Self-test photo engine
         working-directory: label_designer
@@ -35,8 +35,10 @@ jobs:
           draw.rectangle([100, 100, 300, 200], fill=(60, 60, 60))
           image.save(path)
           result = ld.PhotoProcessor(path).render(ld.photo_params(None))
-          assert set(result.getdata()) <= {0, 255}
-          print("photo engine OK", ld.cv2.__version__)
+          histogram = result.convert("L").histogram()
+          assert sum(histogram[1:255]) == 0 and histogram[0] > 0
+          assert "numpy" not in sys.modules and "cv2" not in sys.modules
+          print("photo engine OK (Pillow only)")
 
       - name: Build exe
         working-directory: label_designer

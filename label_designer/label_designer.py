@@ -3,6 +3,7 @@
 """Редактор та друк наліпок (типово 50x30 мм, є власні пресети) для Windows/Xprinter."""
 
 import base64
+import bisect
 import copy
 import csv
 import ctypes
@@ -12,13 +13,16 @@ import ipaddress
 import json
 import math
 import os
+import re
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tkinter as tk
 import uuid
+import zlib
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter import font as tkfont
@@ -26,7 +30,7 @@ from tkinter import font as tkfont
 if os.name == "nt":
     import winreg
 
-from PIL import Image, ImageChops, ImageEnhance, ImageFilter, ImageOps, ImageTk
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageMath, ImageOps, ImageTk
 import barcode
 import qrcode
 from barcode.writer import ImageWriter
@@ -160,8 +164,166 @@ THEMES = {
         "logo_gear": "#e8ecf2",
         "logo_bolt": "#22d3ee",
     },
+    "cyber": {
+        "title": "Кіберпанк",
+        "dark": True,
+        "panel": "#140b22",
+        "header": "#0c0616",
+        "soft": "#1f1233",
+        "border": "#3a1f5c",
+        "text": "#f7f0ff",
+        "muted": "#a68bc9",
+        "field": "#0c0616",
+        "accent": "#ff2a6d",
+        "accent_hover": "#ff4f87",
+        "accent_pressed": "#e0125a",
+        "accent_soft": "#2d1238",
+        "accent_text": "#ffffff",
+        "accent_disabled": "#5a2246",
+        "pressed": "#4a1a3f",
+        "workspace": "#07030d",
+        "shadow": "#000000",
+        "glow": ("#061219", "#071d26", "#082b36", "#0a3f4d"),
+        "status": "#0c0616",
+        "ok": "#39ff88",
+        "error": "#ff5470",
+        "checking": "#ffd23f",
+        "ok_hint": "#7dffb2",
+        "selection": "#ff2a6d",
+        "tooltip_bg": "#05d9e8",
+        "tooltip_fg": "#0c0616",
+        "logo_gear": "#f7f0ff",
+        "logo_bolt": "#05d9e8",
+    },
+    "synthwave": {
+        "title": "Синтвейв",
+        "dark": True,
+        "panel": "#241734",
+        "header": "#1a1029",
+        "soft": "#2f1f45",
+        "border": "#4b2f6b",
+        "text": "#fdf3ff",
+        "muted": "#b79fd6",
+        "field": "#1a1029",
+        "accent": "#ff71ce",
+        "accent_hover": "#ff8fd9",
+        "accent_pressed": "#e655b5",
+        "accent_soft": "#3a2152",
+        "accent_text": "#1a1029",
+        "accent_disabled": "#6b3d63",
+        "pressed": "#4d2b66",
+        "workspace": "#130b1e",
+        "shadow": "#000000",
+        "glow": ("#1c1030", "#2a1340", "#3d1652", "#561a63"),
+        "status": "#1a1029",
+        "ok": "#72f1b8",
+        "error": "#fe4450",
+        "checking": "#fede5d",
+        "ok_hint": "#a0f5cf",
+        "selection": "#e040a0",
+        "tooltip_bg": "#fede5d",
+        "tooltip_fg": "#241734",
+        "logo_gear": "#fdf3ff",
+        "logo_bolt": "#fede5d",
+    },
+    "acid": {
+        "title": "Кислота",
+        "dark": True,
+        "panel": "#151515",
+        "header": "#0d0d0d",
+        "soft": "#202020",
+        "border": "#333333",
+        "text": "#f2f2f2",
+        "muted": "#9a9a9a",
+        "field": "#0d0d0d",
+        "accent": "#c6ff00",
+        "accent_hover": "#d4ff3d",
+        "accent_pressed": "#a8d900",
+        "accent_soft": "#252e05",
+        "accent_text": "#0d0d0d",
+        "accent_disabled": "#4a5a10",
+        "pressed": "#3a4a00",
+        "workspace": "#080808",
+        "shadow": "#000000",
+        "glow": ("#0e1203", "#141b04", "#1d2805", "#283a06"),
+        "status": "#0d0d0d",
+        "ok": "#c6ff00",
+        "error": "#ff4d4d",
+        "checking": "#ffd400",
+        "ok_hint": "#e0ff80",
+        "selection": "#7cb300",
+        "tooltip_bg": "#c6ff00",
+        "tooltip_fg": "#0d0d0d",
+        "logo_gear": "#f2f2f2",
+        "logo_bolt": "#c6ff00",
+    },
+    "bubblegum": {
+        "title": "Бабл-гам",
+        "dark": False,
+        "panel": "#ffffff",
+        "header": "#ffe4f1",
+        "soft": "#fff0f7",
+        "border": "#ffd0e6",
+        "text": "#2b1020",
+        "muted": "#9a6a84",
+        "field": "#ffffff",
+        "accent": "#ff3d9a",
+        "accent_hover": "#ff1f8a",
+        "accent_pressed": "#e01577",
+        "accent_soft": "#ffe1ef",
+        "accent_text": "#ffffff",
+        "accent_disabled": "#ffb3d6",
+        "pressed": "#ffcfe5",
+        "workspace": "#fbe3ee",
+        "shadow": "#efbcd3",
+        "glow": (),
+        "status": "#fff5fa",
+        "ok": "#0f9d58",
+        "error": "#d62d4f",
+        "checking": "#b7791f",
+        "ok_hint": "#3f8f5f",
+        "selection": "#ff3d9a",
+        "tooltip_bg": "#2b1020",
+        "tooltip_fg": "#ffffff",
+        "logo_gear": "#2b1020",
+        "logo_bolt": "#ff3d9a",
+    },
+    "mint": {
+        "title": "М’ята",
+        "dark": False,
+        "panel": "#ffffff",
+        "header": "#dff7ee",
+        "soft": "#effbf6",
+        "border": "#c8eedf",
+        "text": "#0f2a22",
+        "muted": "#5b7d70",
+        "field": "#ffffff",
+        "accent": "#00b37e",
+        "accent_hover": "#009e6f",
+        "accent_pressed": "#008a61",
+        "accent_soft": "#dcf6ec",
+        "accent_text": "#ffffff",
+        "accent_disabled": "#99dcc4",
+        "pressed": "#c2eedd",
+        "workspace": "#e2f3ec",
+        "shadow": "#b9dccd",
+        "glow": (),
+        "status": "#f3fbf8",
+        "ok": "#0a8f5a",
+        "error": "#d14343",
+        "checking": "#a16207",
+        "ok_hint": "#2e7d5b",
+        "selection": "#00a372",
+        "tooltip_bg": "#0f2a22",
+        "tooltip_fg": "#ffffff",
+        "logo_gear": "#0f2a22",
+        "logo_bolt": "#00b37e",
+    },
 }
 DEFAULT_THEME = "light"
+# Колір ліній-підказок вирівнювання під час перетягування (видно на білій наліпці в усіх темах).
+GUIDE_COLOR = "#ff2d95"
+MAX_RECENT_FILES = 8
 # Поточна палітра; оновлюється на місці при зміні теми.
 COLORS = dict(THEMES[DEFAULT_THEME])
 # Ctrl+літера має працювати й в українській/російській розкладці:
@@ -319,11 +481,118 @@ def render_app_icon(size, start="#7c3aed", end="#06b6d4"):
     return tile.resize((size, size), Image.Resampling.LANCZOS)
 
 
+def render_icon(name, color, size=18):
+    """Векторні іконки інтерфейсу (малюються в 4× і зменшуються — рівні згладжені краї).
+
+    Координати задано в сітці 24×24, як у звичних наборах іконок.
+    """
+    scale = 4
+    big = size * scale
+    image = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    unit = big / 24.0
+    stroke = max(1, round(2.1 * unit))
+
+    def pt(x, y):
+        return x * unit, y * unit
+
+    def line(*points):
+        draw.line([pt(x, y) for x, y in points], fill=color, width=stroke, joint="curve")
+        for x, y in (points[0], points[-1]):
+            radius = stroke / 2
+            cx, cy = pt(x, y)
+            draw.ellipse((cx - radius, cy - radius, cx + radius, cy + radius), fill=color)
+
+    def bar(x0, y0, x1, y1):
+        draw.rounded_rectangle((*pt(x0, y0), *pt(x1, y1)), radius=1.3 * unit, fill=color)
+
+    if name in ("undo", "redo"):
+        # Стрілка-розворот: вістря ліворуч, хвіст загинається праворуч донизу.
+        radius = 4.6
+        cx, cy = 14.4, 13.4
+        line((8.2, cy - radius), (cx, cy - radius))
+        half = stroke / 2
+        draw.arc(
+            (cx * unit - radius * unit - half, cy * unit - radius * unit - half,
+             cx * unit + radius * unit + half, cy * unit + radius * unit + half),
+            start=-90, end=90, fill=color, width=stroke,
+        )
+        line((cx, cy + radius), (8.5, cy + radius))
+        draw.polygon([pt(2.6, cy - radius), pt(9.4, cy - radius - 4.6), pt(9.4, cy - radius + 4.6)], fill=color)
+        if name == "redo":
+            image = ImageOps.mirror(image)
+    elif name.startswith("align_"):
+        kind = name[6:]
+        if kind in ("left", "hcenter", "right"):
+            x = {"left": 3.5, "hcenter": 12.0, "right": 20.5}[kind]
+            line((x, 2.8), (x, 21.2))
+            for top, length in ((5.5, 13.0), (13.5, 8.0)):
+                if kind == "left":
+                    left = 6.0
+                elif kind == "right":
+                    left = 18.0 - length
+                else:
+                    left = 12.0 - length / 2
+                bar(left, top, left + length, top + 5.0)
+        else:
+            y = {"top": 3.5, "vcenter": 12.0, "bottom": 20.5}[kind]
+            line((2.8, y), (21.2, y))
+            for left, length in ((5.5, 13.0), (13.5, 8.0)):
+                if kind == "top":
+                    top = 6.0
+                elif kind == "bottom":
+                    top = 18.0 - length
+                else:
+                    top = 12.0 - length / 2
+                bar(left, top, left + 5.0, top + length)
+    elif name == "dist_h":
+        line((3.0, 4.0), (3.0, 20.0))
+        line((21.0, 4.0), (21.0, 20.0))
+        bar(9.0, 6.5, 15.0, 17.5)
+    elif name == "dist_v":
+        line((4.0, 3.0), (20.0, 3.0))
+        line((4.0, 21.0), (20.0, 21.0))
+        bar(6.5, 9.0, 17.5, 15.0)
+    return image.resize((size, size), Image.Resampling.LANCZOS)
+
+
+def render_theme_swatch(theme, width=46, height=26):
+    """Мініатюра теми: шапка, панель, кнопка акценту і біла наліпка зі сяйвом."""
+    scale = 4
+    w, h = width * scale, height * scale
+    image = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    radius = 5 * scale
+    draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=radius, fill=theme["workspace"],
+                           outline=theme["border"], width=scale)
+    mask = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, w - 1, h - 1), radius=radius, fill=255)
+    top = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    top_draw = ImageDraw.Draw(top)
+    top_draw.rectangle((0, 0, w, 6 * scale), fill=theme["header"])
+    top_draw.rectangle((w - 15 * scale, 6 * scale, w, h), fill=theme["panel"])
+    top_draw.rounded_rectangle((w - 12 * scale, 10 * scale, w - 3 * scale, 15 * scale),
+                               radius=2 * scale, fill=theme["accent"])
+    top_draw.rounded_rectangle((w - 12 * scale, 18 * scale, w - 5 * scale, 20 * scale),
+                               radius=scale, fill=theme["muted"])
+    image.paste(top, (0, 0), ImageChops.multiply(top.getchannel("A"), mask))
+    label = (5 * scale, 10 * scale, 27 * scale, 21 * scale)
+    for index, color in enumerate(theme.get("glow") or ()):
+        spread = (len(theme["glow"]) - index) * scale // 2 + scale // 2
+        draw.rounded_rectangle((label[0] - spread, label[1] - spread, label[2] + spread, label[3] + spread),
+                               radius=2 * scale, fill=color)
+    draw.rectangle(label, fill="#ffffff")
+    draw.rectangle((8 * scale, 13 * scale, 18 * scale, 15 * scale), fill="#151515")
+    draw.rectangle((8 * scale, 17 * scale, 22 * scale, 18 * scale), fill="#9aa0a8")
+    draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=radius, outline=theme["border"], width=scale)
+    return image.resize((width, height), Image.Resampling.LANCZOS)
+
+
 # ---- Обробка фото ------------------------------------------------------------------------
 # XP-420B друкує з роздільністю 203 dpi ≈ 8 точок на міліметр.
 PRINTER_DOTS_PER_MM = 8
 ADJUST_DEFAULTS = {
-    "mode": "color",        # color | gray | bw | dither
+    "mode": "color",        # color | gray | bw
     "brightness": 0,        # -100…100
     "contrast": 0,          # -100…100
     "saturation": 100,      # 0…200 %
@@ -384,7 +653,7 @@ def apply_tone_adjustments(image, adjust):
 
 
 def apply_bit_mode(image, adjust):
-    """Режими «Ч/Б» і «Точки» (після масштабування до роздільності друку)."""
+    """Режим «Ч/Б» (після масштабування до роздільності друку)."""
     alpha = image.getchannel("A")
     gray = Image.alpha_composite(Image.new("RGBA", image.size, "white"), image).convert("L")
     if adjust["mode"] == "bw":
@@ -416,17 +685,10 @@ def fit_image(image, box, preserve_aspect):
     return image.resize(size, Image.Resampling.LANCZOS)
 
 
-# ---- Редагування фото для чорно-білого друку (OpenCV) ------------------------------------
-try:
-    import numpy as np
-    import cv2
-except Exception:  # без OpenCV редактор фото недоступний, решта програми працює
-    np = None
-    cv2 = None
-
+# ---- Редагування фото для чорно-білого друку (лише Pillow, без важких бібліотек) -------------
 PHOTO_WORK_MAX = 2000
 PHOTO_DEFAULTS = {
-    "mode": "bw",           # bw — чисто чорне й біле | dots — фото точками | original
+    "mode": "bw",           # bw — чисто чорне й біле | original — без перетворення кольорів
     "shadows": False,       # вирівняти нерівне світло й тіні
     "level": 0,             # більше (+) / менше (−) чорного — зсув від автопорогу
     "clean": 1,             # прибрати дрібне сміття: 0 — ні, 1 — мало, 2 — середньо, 3 — багато
@@ -441,15 +703,15 @@ PHOTO_DEFAULTS = {
 }
 PHOTO_MODES = (
     ("bw", "Ч/Б", "Лише чисто чорне й біле — для логотипів і тексту"),
-    ("dots", "Точки", "Справжнє фото з точок — термопринтер передасть півтони"),
     ("original", "Оригінал", "Без перетворення кольорів (лише обрізка й очистка)"),
 )
 PHOTO_CLEAN_LEVELS = (("Ні", 0), ("Мало", 14), ("Сер.", 45), ("Багато", 160))
 PHOTO_LEVEL_STEP = 8
+_INK_RUN = re.compile(rb"[^\x00]+")
 
 
 def photo_available():
-    return np is not None and cv2 is not None
+    return True
 
 
 def photo_params(photo):
@@ -460,6 +722,8 @@ def photo_params(photo):
                 params[key] = copy.deepcopy(photo[key])
     if not isinstance(params["seeds"], list):
         params["seeds"] = []
+    if params["mode"] not in ("bw", "original"):
+        params["mode"] = "bw"   # колишній режим «Точки» → Ч/Б
     return params
 
 
@@ -484,7 +748,42 @@ def oriented_size(path):
     return width, height
 
 
+def mm_text(value):
+    return f"{value:.1f}".rstrip("0").rstrip(".")
+
+
+def plural_objects(count):
+    if count % 10 == 1 and count % 100 != 11:
+        return "об’єкт"
+    if 2 <= count % 10 <= 4 and not 12 <= count % 100 <= 14:
+        return "об’єкти"
+    return "об’єктів"
+
+
+_SOURCE_CACHE = {}
+
+
 def load_oriented_image(path, max_side=None):
+    """Відкрити картинку з урахуванням EXIF-повороту (кілька останніх — з кешу, щоб поворот
+    коліщатком і перетягування були плавними навіть із великими фото)."""
+    try:
+        stat = os.stat(path)
+        key = (os.path.abspath(str(path)), stat.st_mtime_ns, stat.st_size, max_side)
+    except OSError:
+        key = None
+    cached = _SOURCE_CACHE.get(key) if key else None
+    if cached is not None:
+        return cached.copy()
+    image = _load_oriented_image(path, max_side)
+    if key:
+        if len(_SOURCE_CACHE) >= 6:
+            _SOURCE_CACHE.pop(next(iter(_SOURCE_CACHE)))
+        _SOURCE_CACHE[key] = image
+        image = image.copy()
+    return image
+
+
+def _load_oriented_image(path, max_side=None):
     with Image.open(path) as source:
         if max_side and source.format == "JPEG":
             source.draft("RGB", (max_side, max_side))
@@ -515,96 +814,253 @@ def crop_fraction(crop):
     return x0, y0, x1, y1
 
 
+def _shifted(image, dx, dy, fill):
+    result = Image.new(image.mode, image.size, fill)
+    result.paste(image, (dx, dy))
+    return result
+
+
+def _window_extreme(image, size, combine, fill, horizontal):
+    """Максимум/мінімум у вікні size (по одній осі) за O(log size) операцій."""
+    if size <= 1:
+        return image
+
+    def shift(img, amount):
+        return _shifted(img, -amount, 0, fill) if horizontal else _shifted(img, 0, -amount, fill)
+
+    result, span = image, 1
+    while span * 2 <= size:
+        result = combine(result, shift(result, span))
+        span *= 2
+    if span < size:
+        result = combine(result, shift(result, size - span))
+    radius = size // 2
+    return _shifted(result, radius, 0, fill) if horizontal else _shifted(result, 0, radius, fill)
+
+
+def grey_dilate(image, size):
+    """Квадратний максимум-фільтр (розширення білого/«чорнила» 255)."""
+    image = _window_extreme(image, size, ImageChops.lighter, 0, True)
+    return _window_extreme(image, size, ImageChops.lighter, 0, False)
+
+
+def grey_erode(image, size):
+    image = _window_extreme(image, size, ImageChops.darker, 255, True)
+    return _window_extreme(image, size, ImageChops.darker, 255, False)
+
+
+def otsu_threshold(gray):
+    histogram = gray.histogram()
+    total = sum(histogram)
+    weighted_total = sum(index * count for index, count in enumerate(histogram))
+    weight_back = sum_back = 0
+    best, threshold = -1.0, 127
+    for value in range(256):
+        weight_back += histogram[value]
+        if not weight_back:
+            continue
+        weight_fore = total - weight_back
+        if not weight_fore:
+            break
+        sum_back += value * histogram[value]
+        mean_back = sum_back / weight_back
+        mean_fore = (weighted_total - sum_back) / weight_fore
+        between = weight_back * weight_fore * (mean_back - mean_fore) ** 2
+        if between > best:
+            best, threshold = between, value
+    return threshold
+
+
 def even_out_light(gray):
     """Прибрати тіні й нерівне освітлення: поділити на оцінку фону."""
-    height, width = gray.shape
-    factor = 4 if min(height, width) >= 64 else 1
-    small = cv2.resize(gray, (max(1, width // factor), max(1, height // factor)), interpolation=cv2.INTER_AREA)
-    size = max(5, int(min(small.shape) / 8) | 1)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (size, size))
-    background = cv2.morphologyEx(small, cv2.MORPH_CLOSE, kernel)
-    background = cv2.GaussianBlur(background, (0, 0), size / 2.0)
-    background = cv2.resize(background, (width, height), interpolation=cv2.INTER_LINEAR)
-    return cv2.divide(gray, np.maximum(background, 1), scale=255)
+    width, height = gray.size
+    factor = 4 if min(width, height) >= 64 else 1
+    small = gray.resize((max(1, width // factor), max(1, height // factor)), Image.Resampling.BOX)
+    size = max(5, int(min(small.size) / 8) | 1)
+    background = grey_erode(grey_dilate(small, size), size)   # «закриття»: прибрати темні деталі
+    background = background.filter(ImageFilter.GaussianBlur(size / 2.0))
+    background = background.resize((width, height), Image.Resampling.BILINEAR)
+    return ImageMath.lambda_eval(
+        lambda args: args["convert"](args["min"](args["a"] * 255.0 / args["max"](args["b"], 1), 255), "L"),
+        a=gray.convert("F"), b=background.convert("F"),
+    )
 
 
-def stretch_levels(gray):
-    low, high = np.percentile(gray, (1, 99))
-    if high - low < 10:
-        return gray
-    table = np.clip((np.arange(256) - low) * 255.0 / (high - low), 0, 255).astype(np.uint8)
-    return cv2.LUT(gray, table)
+class InkComponents:
+    """Зв'язні плями «чорнила» (8-зв'язність) через відрізки рядків — швидко і без numpy."""
+
+    def __init__(self, ink):
+        self.width, self.height = ink.size
+        data = ink.tobytes()
+        width = self.width
+        self.row_first = []
+        self.row_starts = []
+        run_y, run_s, run_e = [], [], []
+        parent = []
+
+        def find(node):
+            while parent[node] != node:
+                parent[node] = parent[parent[node]]
+                node = parent[node]
+            return node
+
+        previous_starts = previous_ends = ()
+        previous_first = 0
+        finder = _INK_RUN.finditer
+        for y in range(self.height):
+            offset = y * width
+            starts, ends = [], []
+            for match in finder(data, offset, offset + width):
+                starts.append(match.start() - offset)
+                ends.append(match.end() - offset)
+            first = len(run_s)
+            count = len(starts)
+            if count:
+                run_s.extend(starts)
+                run_e.extend(ends)
+                run_y.extend([y] * count)
+                parent.extend(range(first, first + count))
+                i = j = 0
+                while i < len(previous_starts) and j < count:
+                    if previous_starts[i] <= ends[j] and starts[j] <= previous_ends[i]:
+                        a, b = find(previous_first + i), find(first + j)
+                        if a != b:
+                            if a < b:
+                                parent[b] = a
+                            else:
+                                parent[a] = b
+                    if previous_ends[i] < ends[j]:
+                        i += 1
+                    else:
+                        j += 1
+            self.row_first.append(first)
+            self.row_starts.append(starts)
+            previous_starts, previous_ends, previous_first = starts, ends, first
+        self.run_y, self.run_s, self.run_e = run_y, run_s, run_e
+        self.root = [find(index) for index in range(len(parent))]
+        area, bounds = {}, {}
+        for index, root in enumerate(self.root):
+            start, end, y = run_s[index], run_e[index], run_y[index]
+            area[root] = area.get(root, 0) + end - start
+            box = bounds.get(root)
+            if box is None:
+                bounds[root] = [start, y, end, y + 1]
+            else:
+                if start < box[0]:
+                    box[0] = start
+                if end > box[2]:
+                    box[2] = end
+                box[3] = y + 1
+        self.area, self.bounds = area, bounds
+        self._members = None
+
+    def root_at(self, x, y):
+        """Пляма в точці (x, y) або -1, якщо там немає чорнила."""
+        if not (0 <= y < self.height and 0 <= x < self.width):
+            return -1
+        starts = self.row_starts[y]
+        index = bisect.bisect_right(starts, x) - 1
+        if index < 0:
+            return -1
+        run = self.row_first[y] + index
+        return self.root[run] if x < self.run_e[run] else -1
+
+    def members(self, root):
+        if self._members is None:
+            members = {}
+            for index, owner in enumerate(self.root):
+                members.setdefault(owner, []).append(index)
+            self._members = members
+        return self._members.get(root, [])
+
+    def small_roots(self, min_area):
+        return {root for root, area in self.area.items() if area < min_area}
+
+    def border_roots(self):
+        return {root for root, (x0, y0, x1, y1) in self.bounds.items()
+                if x0 <= 0 or y0 <= 0 or x1 >= self.width or y1 >= self.height}
+
+    def erase(self, ink, roots):
+        """Копія ink без плям roots."""
+        if not roots:
+            return ink
+        buffer = bytearray(ink.tobytes())
+        width = self.width
+        for root in roots:
+            for index in self.members(root):
+                offset = self.run_y[index] * width
+                start, end = self.run_s[index], self.run_e[index]
+                buffer[offset + start:offset + end] = bytes(end - start)
+        return Image.frombytes("L", ink.size, bytes(buffer))
+
+    def region_mask(self, root, box):
+        """Маска плями root усередині прямокутника box (255 — пляма)."""
+        x0, y0, x1, y1 = box
+        width, height = max(1, x1 - x0), max(1, y1 - y0)
+        buffer = bytearray(width * height)
+        for index in self.members(root):
+            y = self.run_y[index]
+            if not y0 <= y < y1:
+                continue
+            start, end = max(self.run_s[index], x0), min(self.run_e[index], x1)
+            if start < end:
+                offset = (y - y0) * width
+                buffer[offset + start - x0:offset + end - x0] = b"\xff" * (end - start)
+        return Image.frombytes("L", (width, height), bytes(buffer))
+
+    def center(self, root):
+        """Найглибша точка плями — стійка «насінина» для чарівної гумки."""
+        box = self.bounds.get(root)
+        if box is None:
+            return None
+        x0, y0, x1, y1 = box
+        mask = self.region_mask(root, (x0 - 1, y0 - 1, x1 + 1, y1 + 1))
+        core = mask
+        for _ in range(4096):
+            eroded = core.filter(ImageFilter.MinFilter(3))
+            if eroded.getbbox() is None:
+                break
+            core = eroded
+        position = core.tobytes().find(b"\xff")
+        if position < 0:
+            return None
+        width = core.size[0]
+        return x0 - 1 + position % width, y0 - 1 + position // width
 
 
-def remove_small_components(mask, min_area):
-    """Прибрати зв'язні плями, менші за min_area пікселів (255 — пляма)."""
+def remove_small_components(ink, min_area):
     if min_area <= 1:
-        return mask
-    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    if count <= 1:
-        return mask
-    small = stats[:, cv2.CC_STAT_AREA] < min_area
-    small[0] = False
-    if not small.any():
-        return mask
-    result = mask.copy()
-    result[small[labels]] = 0
-    return result
+        return ink
+    components = InkComponents(ink)
+    return components.erase(ink, components.small_roots(min_area))
 
 
-def remove_border_components(mask):
-    """Прибрати плями, що торкаються країв (тіні, край столу тощо)."""
-    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    if count <= 1:
-        return mask
-    height, width = mask.shape
-    left = stats[:, cv2.CC_STAT_LEFT]
-    top = stats[:, cv2.CC_STAT_TOP]
-    right = left + stats[:, cv2.CC_STAT_WIDTH]
-    bottom = top + stats[:, cv2.CC_STAT_HEIGHT]
-    touch = (left <= 0) | (top <= 0) | (right >= width) | (bottom >= height)
-    touch[0] = False
-    if not touch.any():
-        return mask
-    result = mask.copy()
-    result[touch[labels]] = 0
-    return result
-
-
-def component_center(labels, label):
-    """Найглибша точка плями — стійка «насінина» для чарівної гумки."""
-    ys, xs = np.nonzero(labels == label)
-    if not len(xs):
-        return None
-    x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
-    part = np.zeros((y1 - y0 + 3, x1 - x0 + 3), np.uint8)
-    part[1:-1, 1:-1] = (labels[y0:y1 + 1, x0:x1 + 1] == label).astype(np.uint8)
-    distance = cv2.distanceTransform(part, cv2.DIST_L2, 3)
-    py, px = np.unravel_index(int(np.argmax(distance)), distance.shape)
-    return int(x0 + px - 1), int(y0 + py - 1)
+def remove_border_components(ink):
+    components = InkComponents(ink)
+    return components.erase(ink, components.border_roots())
 
 
 def load_paint_masks(path, size):
-    """Шар пензля: (біле, чорне) як булеві маски розміру size або (None, None)."""
+    """Шар пензля: (біле, чорне) як маски "L" (255 — зафарбовано) або (None, None)."""
     if not path or not os.path.isfile(path):
         return None, None
     with Image.open(path) as image:
         layer = image.convert("RGBA")
     if layer.size != tuple(size):
         layer = layer.resize(tuple(size), Image.Resampling.NEAREST)
-    data = np.asarray(layer)
-    painted = data[..., 3] > 127
-    white = painted & (data[..., 0] > 127)
-    black = painted & (data[..., 0] <= 127)
-    return (white if white.any() else None), (black if black.any() else None)
+    red, _green, _blue, alpha = layer.split()
+    painted = alpha.point(lambda value: 255 if value > 127 else 0)
+    light = red.point(lambda value: 255 if value > 127 else 0)
+    white = ImageChops.multiply(painted, light)
+    black = ImageChops.subtract(painted, light)
+    return (white if white.getbbox() else None), (black if black.getbbox() else None)
 
 
 def save_paint_masks(white, black, path):
-    height, width = white.shape
-    data = np.zeros((height, width, 4), np.uint8)
-    data[white.astype(bool)] = (255, 255, 255, 255)
-    data[black.astype(bool)] = (0, 0, 0, 255)
-    Image.fromarray(data, "RGBA").save(path, "PNG")
+    layer = Image.new("RGBA", white.size, (0, 0, 0, 0))
+    layer.paste((255, 255, 255, 255), (0, 0), white)
+    layer.paste((0, 0, 0, 255), (0, 0), black)
+    layer.save(path, "PNG")
 
 
 class PhotoProcessor:
@@ -614,9 +1070,9 @@ class PhotoProcessor:
         base = load_oriented_image(path, PHOTO_WORK_MAX)
         paper = Image.new("RGBA", base.size, "white")
         paper.alpha_composite(base)
-        self.color = np.ascontiguousarray(np.asarray(paper.convert("RGB")))
-        self.gray = cv2.cvtColor(self.color, cv2.COLOR_RGB2GRAY)
-        self.height, self.width = self.gray.shape
+        self.color = paper.convert("RGB")
+        self.gray = self.color.convert("L")
+        self.width, self.height = self.gray.size
         self.area_scale = max(0.25, self.width * self.height / 3_000_000)
         self.detail = max(1, round(max(self.width, self.height) / 600))
         self._cache = {}
@@ -647,21 +1103,18 @@ class PhotoProcessor:
         key = ("tone", box, bool(params["shadows"]), bool(params["smooth"]))
 
         def build():
-            x0, y0, x1, y1 = box
-            gray = self.gray[y0:y1, x0:x1]
+            gray = self.gray.crop(box)
             if params["shadows"]:
                 gray = even_out_light(gray)
             if params["smooth"]:
-                gray = cv2.GaussianBlur(gray, (0, 0), 0.5 + 0.35 * self.detail)
-            return np.ascontiguousarray(gray)
+                gray = gray.filter(ImageFilter.GaussianBlur(0.5 + 0.35 * self.detail))
+            return gray
 
         return self._cached(key, build)
 
     def auto_threshold(self, params, box):
         key = ("otsu", box, bool(params["shadows"]), bool(params["smooth"]))
-        return self._cached(key, lambda: int(cv2.threshold(
-            self.tone(params, box), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
-        )[0]))
+        return self._cached(key, lambda: otsu_threshold(self.tone(params, box)))
 
     def threshold(self, params, box):
         return int(min(254, max(1, self.auto_threshold(params, box) + int(params["level"]))))
@@ -673,10 +1126,10 @@ class PhotoProcessor:
 
         def build():
             threshold = self.threshold(params, box)
-            _, ink = cv2.threshold(self.tone(params, box), threshold - 1, 255, cv2.THRESH_BINARY_INV)
+            table = [255 if value < threshold else 0 for value in range(256)]
             if params["invert"]:
-                ink = cv2.bitwise_not(ink)
-            return ink
+                table = [255 - value for value in table]
+            return self.tone(params, box).point(table)
 
         return self._cached(key, build)
 
@@ -688,19 +1141,16 @@ class PhotoProcessor:
         def build():
             ink = self.raw_ink(params, box)
             if params["smooth"]:
-                ink = cv2.medianBlur(ink, 3 if self.detail < 3 else 5)
+                ink = ink.filter(ImageFilter.MedianFilter(3 if self.detail < 3 else 5))
             weight = int(params["weight"])
             if weight:
-                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-                steps = abs(weight) * self.detail
-                ink = cv2.dilate(ink, kernel, iterations=steps) if weight > 0 else cv2.erode(
-                    ink, kernel, iterations=steps
-                )
+                size = 2 * abs(weight) * self.detail + 1
+                ink = grey_dilate(ink, size) if weight > 0 else grey_erode(ink, size)
             level = max(0, min(len(PHOTO_CLEAN_LEVELS) - 1, int(params["clean"])))
             if level:
                 area = PHOTO_CLEAN_LEVELS[level][1] * self.area_scale
                 ink = remove_small_components(ink, area)
-                ink = cv2.bitwise_not(remove_small_components(cv2.bitwise_not(ink), area / 2))
+                ink = ImageOps.invert(remove_small_components(ImageOps.invert(ink), area / 2))
             if params["edges"]:
                 ink = remove_border_components(ink)
             return ink
@@ -708,62 +1158,56 @@ class PhotoProcessor:
         return self._cached(key, build)
 
     def seed_params(self, params):
-        """Для «Точок» і «Оригіналу» плями шукаємо без згладжування й товщини."""
+        """Для «Оригіналу» плями шукаємо без згладжування й товщини."""
         if params["mode"] == "bw":
             return params
         return dict(params, smooth=False, weight=0)
 
-    def final_ink(self, params, box, white=None, black=None):
-        params = self.seed_params(params)
-        ink = self.clean_ink(params, box).copy()
-        x0, y0, x1, y1 = box
+    def painted_ink(self, params, box, white=None, black=None):
+        """Чорнило з урахуванням пензля й гумки (ще без чарівної гумки)."""
+        ink = self.clean_ink(self.seed_params(params), box).copy()
         if white is not None:
-            ink[white[y0:y1, x0:x1]] = 0
+            ink.paste(0, (0, 0), white.crop(box))
         if black is not None:
-            ink[black[y0:y1, x0:x1]] = 255
-        for seed in params["seeds"] or ():
-            try:
-                px = int(float(seed[0]) * self.width) - x0
-                py = int(float(seed[1]) * self.height) - y0
-            except (TypeError, ValueError, IndexError):
-                continue
-            if 0 <= px < ink.shape[1] and 0 <= py < ink.shape[0] and ink[py, px]:
-                cv2.floodFill(ink, None, (px, py), 0, flags=8)
+            ink.paste(255, (0, 0), black.crop(box))
         return ink
 
+    def final_ink(self, params, box, white=None, black=None):
+        ink = self.painted_ink(params, box, white, black)
+        seeds = params["seeds"] or ()
+        if not seeds:
+            return ink
+        components = InkComponents(ink)
+        roots = set()
+        for seed in seeds:
+            try:
+                px = int(float(seed[0]) * self.width) - box[0]
+                py = int(float(seed[1]) * self.height) - box[1]
+            except (TypeError, ValueError, IndexError):
+                continue
+            root = components.root_at(px, py)
+            if root >= 0:
+                roots.add(root)
+        return components.erase(ink, roots)
+
     def render(self, params, white=None, black=None):
-        """Готове зображення обрізаної частини: L (Ч/Б, точки) або RGB (оригінал)."""
+        """Готове зображення обрізаної частини: L (Ч/Б) або RGB (оригінал)."""
         box = self.crop_box(params["crop"])
         ink = self.final_ink(params, box, white, black)
         if params["mode"] == "bw":
-            return Image.fromarray(cv2.bitwise_not(ink), "L")
-        x0, y0, x1, y1 = box
-        seed_params = self.seed_params(params)
-        removed = cv2.bitwise_and(self.raw_ink(seed_params, box), cv2.bitwise_not(ink))
+            return ImageOps.invert(ink)
+        removed = ImageChops.subtract(self.raw_ink(self.seed_params(params), box), ink)
         if white is not None:
-            removed[white[y0:y1, x0:x1]] = 255
-        if removed.any():
-            removed = cv2.dilate(removed, np.ones((3, 3), np.uint8), iterations=self.detail)
-        black_part = black[y0:y1, x0:x1] if black is not None else None
-        if params["mode"] == "dots":
-            gray = self.gray[y0:y1, x0:x1]
-            if params["shadows"]:
-                gray = even_out_light(gray)
-            gray = stretch_levels(gray).astype(np.int16)
-            gray = np.clip(gray - int(params["level"]) * 2, 0, 255).astype(np.uint8)
-            if params["invert"]:
-                gray = cv2.bitwise_not(gray)
-            gray[removed > 0] = 255
-            if black_part is not None:
-                gray[black_part] = 0
-            return Image.fromarray(gray, "L")
-        color = self.color[y0:y1, x0:x1].copy()
+            removed = ImageChops.lighter(removed, white.crop(box))
+        if removed.getbbox():
+            removed = grey_dilate(removed, 2 * self.detail + 1)
+        color = self.color.crop(box)
         if params["invert"]:
-            color = 255 - color
-        color[removed > 0] = 255
-        if black_part is not None:
-            color[black_part] = 0
-        return Image.fromarray(color, "RGB")
+            color = ImageOps.invert(color)
+        color.paste((255, 255, 255), (0, 0), removed)
+        if black is not None:
+            color.paste((0, 0, 0), (0, 0), black.crop(box))
+        return color
 
 
 LOCAL_DRIVER_SOURCE = (
@@ -1013,12 +1457,8 @@ class PhotoEditor(tk.Toplevel):
         self.params = photo_params(element.get("photo"))
         size = (processor.width, processor.height)
         white, black = app._paint_masks(self.params["paint"], size)
-        self.white = np.zeros((processor.height, processor.width), np.uint8)
-        self.black = np.zeros((processor.height, processor.width), np.uint8)
-        if white is not None:
-            self.white[white] = 1
-        if black is not None:
-            self.black[black] = 1
+        self.white = white.copy() if white is not None else Image.new("L", size, 0)
+        self.black = black.copy() if black is not None else Image.new("L", size, 0)
         self.history = []
         self.future = []
         self.tool = "magic"
@@ -1027,8 +1467,8 @@ class PhotoEditor(tk.Toplevel):
         self.ox = self.oy = 0.0
         self.box = processor.crop_box(self.params["crop"])
         self.result = None
-        self.labels = None
-        self.hover_label = 0
+        self.components = None
+        self.hover_label = -1
         self.full_image = None
         self.photo = None
         self.stroke_last = None
@@ -1069,8 +1509,8 @@ class PhotoEditor(tk.Toplevel):
         tool_button(top, "Готово ✓", self._apply, "Застосувати зміни (Enter)", style="Accent.TButton",
                     side="right")
         tool_button(top, "Скасувати", self._close, "Закрити без змін", side="right")
-        tool_button(top, "↶", self._undo, "Скасувати дію (Ctrl+Z)")
-        tool_button(top, "↷", self._redo, "Повторити дію (Ctrl+Y)")
+        app._icon_button(top, "undo", self._undo, "Скасувати дію (Ctrl+Z)", size=20, padx=2)
+        app._icon_button(top, "redo", self._redo, "Повторити дію (Ctrl+Y)", size=20, padx=2)
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=8)
         ttk.Label(top, text="Пензель").pack(side="left", padx=(0, 4))
         tool_button(top, "−", lambda: self._brush_step(-1), "Менший пензель ([)")
@@ -1160,19 +1600,19 @@ class PhotoEditor(tk.Toplevel):
     # ---- стан і історія -----------------------------------------------------------------------
     def _state_key(self):
         params = {key: value for key, value in self.params.items() if key != "paint"}
-        digest = hashlib.md5(np.packbits(self.white).tobytes() + np.packbits(self.black).tobytes()).hexdigest()
+        digest = hashlib.md5(self.white.tobytes() + self.black.tobytes()).hexdigest()
         return json.dumps(params, sort_keys=True) + digest
 
     def _snapshot(self):
-        return copy.deepcopy(self.params), np.packbits(self.white), np.packbits(self.black)
+        return (copy.deepcopy(self.params), zlib.compress(self.white.tobytes(), 1),
+                zlib.compress(self.black.tobytes(), 1))
 
     def _restore(self, snapshot):
         params, white, black = snapshot
-        count = self.processor.width * self.processor.height
-        shape = (self.processor.height, self.processor.width)
+        size = (self.processor.width, self.processor.height)
         self.params = params
-        self.white = np.unpackbits(white, count=count).reshape(shape)
-        self.black = np.unpackbits(black, count=count).reshape(shape)
+        self.white = Image.frombytes("L", size, zlib.decompress(white))
+        self.black = Image.frombytes("L", size, zlib.decompress(black))
         self.full_image = None
         self._recompute()
 
@@ -1211,17 +1651,35 @@ class PhotoEditor(tk.Toplevel):
     def _reset_all(self):
         self._push_history()
         self.params = photo_params(None)
-        self.white[:] = 0
-        self.black[:] = 0
+        size = (self.processor.width, self.processor.height)
+        self.white = Image.new("L", size, 0)
+        self.black = Image.new("L", size, 0)
         self._recompute()
         self._fit()
         self.hint_var.set("Усе скинуто: автоматичне Ч/Б без правок")
 
     # ---- обчислення й показ --------------------------------------------------------------------
     def _masks(self):
-        white = self.white.astype(bool) if self.white.any() else None
-        black = self.black.astype(bool) if self.black.any() else None
+        white = self.white if self.white.getbbox() else None
+        black = self.black if self.black.getbbox() else None
         return white, black
+
+    def _preview_paint(self):
+        """Швидкий показ мазка без повного перерахунку (повний — коли відпустите мишку)."""
+        self.recompute_job = None
+        if self.result is None:
+            return
+        preview = self.result.copy()
+        paint_white = (255, 255, 255) if preview.mode == "RGB" else 255
+        paint_black = (0, 0, 0) if preview.mode == "RGB" else 0
+        preview.paste(paint_white, (0, 0), self.white.crop(self.box))
+        preview.paste(paint_black, (0, 0), self.black.crop(self.box))
+        self.result = preview
+        self._render()
+
+    def _schedule_preview(self):
+        if self.recompute_job is None:
+            self.recompute_job = self.after(15, self._preview_paint)
 
     def _schedule_recompute(self):
         if self.recompute_job is None:
@@ -1236,8 +1694,8 @@ class PhotoEditor(tk.Toplevel):
         except Exception as exc:
             messagebox.showerror("Редактор фото", f"Не вдалося обробити фото:\n{exc}", parent=self)
             return
-        self.labels = None
-        self.hover_label = 0
+        self.components = None
+        self.hover_label = -1
         self.controls.refresh(self.params)
         for key, widget in self.tool_buttons.items():
             widget.configure(style="SegOn.TButton" if key == self.tool else "Tool.TButton")
@@ -1247,20 +1705,19 @@ class PhotoEditor(tk.Toplevel):
         self._render()
 
     def _ensure_labels(self):
-        if self.labels is None:
+        if self.components is None:
             white, black = self._masks()
             ink = self.processor.final_ink(self.params, self.box, white, black)
-            self.labels = cv2.connectedComponents(ink, connectivity=8)[1]
-        return self.labels
+            self.components = InkComponents(ink)
+        return self.components
 
     def _current_image(self):
         if self.tool == "crop":
             if self.full_image is None:
-                self.full_image = Image.fromarray(self.processor.color, "RGB")
+                self.full_image = self.processor.color
             return self.full_image
         if self.compare:
-            x0, y0, x1, y1 = self.box
-            return Image.fromarray(np.ascontiguousarray(self.processor.color[y0:y1, x0:x1]), "RGB")
+            return self.processor.color.crop(self.box)
         return self.result
 
     def _canvas_resized(self, _event=None):
@@ -1309,13 +1766,13 @@ class PhotoEditor(tk.Toplevel):
         )
         if x1 > x0 and y1 > y0:
             region = image.crop((x0, y0, x1, y1))
-            if (self.tool == "magic" and self.hover_label and self.labels is not None
+            if (self.tool == "magic" and self.hover_label >= 0 and self.components is not None
                     and not self.compare and not self.pick):
-                mask = self.labels[y0:y1, x0:x1] == self.hover_label
-                if mask.any():
+                mask = self.components.region_mask(self.hover_label, (x0, y0, x1, y1))
+                if mask.getbbox():
                     region = region.convert("RGB")
                     red = Image.new("RGB", region.size, (235, 40, 70))
-                    region = Image.composite(red, region, Image.fromarray(mask.astype(np.uint8) * 255, "L"))
+                    region = Image.composite(red, region, mask)
             target = (max(1, round((x1 - x0) * zoom)), max(1, round((y1 - y0) * zoom)))
             resample = Image.Resampling.NEAREST if zoom >= 1 else Image.Resampling.BOX
             self.photo = ImageTk.PhotoImage(region.resize(target, resample))
@@ -1376,7 +1833,7 @@ class PhotoEditor(tk.Toplevel):
         self.pick = None
         self.lasso = []
         self.crop_drag = None
-        self.hover_label = 0
+        self.hover_label = -1
         self.canvas.configure(cursor="fleur" if tool == "hand" else "crosshair")
         self._recompute()
         if (previous == "crop") != (tool == "crop"):
@@ -1441,7 +1898,7 @@ class PhotoEditor(tk.Toplevel):
                 self._paint_line(point, point)
             self.stroke_last = point
             self.stroke_active = True
-            self._schedule_recompute()
+            self._schedule_preview()
         elif self.tool == "lasso":
             self.lasso = [self._image_point(event)]
 
@@ -1458,7 +1915,7 @@ class PhotoEditor(tk.Toplevel):
             point = self._to_full(*self._image_point(event, clamp=False))
             self._paint_line(self.stroke_last, point)
             self.stroke_last = point
-            self._schedule_recompute()
+            self._schedule_preview()
         elif self.tool == "lasso" and self.lasso:
             x, y = self._image_point(event)
             last_x, last_y = self.lasso[-1]
@@ -1490,9 +1947,9 @@ class PhotoEditor(tk.Toplevel):
             self.lasso = []
             if len(points) >= 3:
                 self._push_history()
-                polygon = np.array([self._to_full(x, y) for x, y in points], np.int32)
-                cv2.fillPoly(self.white, [polygon], 1)
-                cv2.fillPoly(self.black, [polygon], 0)
+                polygon = [self._to_full(x, y) for x, y in points]
+                ImageDraw.Draw(self.white).polygon(polygon, fill=255)
+                ImageDraw.Draw(self.black).polygon(polygon, fill=0)
                 self._recompute()
                 self.hint_var.set("Обведене стерто")
             else:
@@ -1507,23 +1964,26 @@ class PhotoEditor(tk.Toplevel):
     def _paint_line(self, start, end):
         thickness = max(1, int(self.brush))
         target, other = (self.white, self.black) if self.tool == "erase" else (self.black, self.white)
-        if start == end:
-            cv2.circle(target, start, max(1, thickness // 2), 1, -1)
-            cv2.circle(other, start, max(1, thickness // 2), 0, -1)
-        else:
-            cv2.line(target, start, end, 1, thickness)
-            cv2.line(other, start, end, 0, thickness)
+        radius = max(1, thickness // 2)
+        for image, fill in ((target, 255), (other, 0)):
+            draw = ImageDraw.Draw(image)
+            if start != end and thickness > 1:
+                draw.line([start, end], fill=fill, width=thickness)
+            elif start != end:
+                draw.line([start, end], fill=fill)
+            for x, y in {start, end}:
+                draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=fill)
 
     def _magic_click(self, event):
         if not self._inside(event):
             return
-        labels = self._ensure_labels()
+        components = self._ensure_labels()
         x, y = self._image_point(event)
-        label = int(labels[int(y), int(x)])
-        if not label:
+        root = components.root_at(int(x), int(y))
+        if root < 0:
             self.hint_var.set("Тут немає чорного — наведіть на пляму, яку треба прибрати")
             return
-        center = component_center(labels, label)
+        center = components.center(root)
         if center is None:
             return
         full_x, full_y = center[0] + self.box[0], center[1] + self.box[1]
@@ -1540,7 +2000,7 @@ class PhotoEditor(tk.Toplevel):
             return
         x, y = self._image_point(event)
         tone = self.processor.tone(self.params, self.box)
-        value = int(tone[int(y), int(x)])
+        value = int(tone.getpixel((int(x), int(y))))
         base = self.processor.auto_threshold(self.params, self.box)
         target = value + 14 if kind == "black" else value - 14
         level = int(max(-160, min(160, target - base)))
@@ -1574,19 +2034,18 @@ class PhotoEditor(tk.Toplevel):
     def _motion(self, event):
         self._draw_cursor(event.x, event.y)
         if self.tool == "magic" and not self.pick and not self.compare:
-            label = 0
+            label = -1
             if self._inside(event):
-                labels = self._ensure_labels()
                 x, y = self._image_point(event)
-                label = int(labels[int(y), int(x)])
+                label = self._ensure_labels().root_at(int(x), int(y))
             if label != self.hover_label:
                 self.hover_label = label
                 self._render()
 
     def _leave(self, _event=None):
         self.canvas.delete("cursor")
-        if self.hover_label:
-            self.hover_label = 0
+        if self.hover_label >= 0:
+            self.hover_label = -1
             self._render()
 
     # ---- клавіатура -----------------------------------------------------------------------------
@@ -1663,7 +2122,7 @@ class PhotoEditor(tk.Toplevel):
             self._destroy()
             return
         paint_path = None
-        if self.white.any() or self.black.any():
+        if self.white.getbbox() or self.black.getbbox():
             folder = self.app.data_dir / "photo_paint"
             folder.mkdir(parents=True, exist_ok=True)
             paint_path = folder / f"paint_{uuid.uuid4().hex}.png"
@@ -1709,6 +2168,7 @@ class LabelDocument:
         self.number = LabelDocument.counter
         self.elements = []
         self.selected_id = None
+        self.selection_ids = []
         self.layout_locked = False
         self.current_file = None
         self.undo_stack = []
@@ -1720,6 +2180,32 @@ class LabelDocument:
 
 
 class LabelDesigner(tk.Tk):
+    # ---- Виділення: один головний елемент (selected_id) + кілька вибраних (selection_ids) ----
+    @property
+    def selected_id(self):
+        return self.__dict__.get("_selected_id")
+
+    @selected_id.setter
+    def selected_id(self, value):
+        # Звичайне присвоєння вибирає рівно один елемент (або нічого).
+        self.__dict__["_selected_id"] = value
+        self.__dict__["selection_ids"] = [value] if value else []
+
+    def _set_selection(self, ids, primary=None):
+        existing = {element["id"] for element in self.elements}
+        ids = [element_id for element_id in dict.fromkeys(ids) if element_id in existing]
+        if primary not in ids:
+            primary = ids[-1] if ids else None
+        self.__dict__["_selected_id"] = primary
+        self.__dict__["selection_ids"] = ids
+
+    def _selected_elements(self):
+        chosen = set(self.selection_ids)
+        return [element for element in self.elements if element["id"] in chosen]
+
+    def _multi(self):
+        return len(self.selection_ids) > 1
+
     def __init__(self):
         super().__init__()
         self.title(APP_NAME)
@@ -1738,6 +2224,14 @@ class LabelDesigner(tk.Tk):
         self.drag_started = False
         self.resize_state = None
         self.rotate_state = None
+        self.group_origin = None
+        self.collapse_on_release = None
+        self.marquee = None
+        self.wheel_rotate_state = None
+        self.icon_buttons = []
+        self.icon_photos = {}
+        self.history_buttons_state = None
+        self.recent_files = []
         self.image_size_cache = {}
         self.bitmap_cache = {}
         self.adjust_compare = False
@@ -1764,7 +2258,7 @@ class LabelDesigner(tk.Tk):
         self.current_file = None
         self.undo_stack = []
         self.redo_stack = []
-        self.clipboard_element = None
+        self.clipboard_elements = []
         self.history_suspended = False
         self.autosave_suspended = True
         self.autosave_job = None
@@ -1977,6 +2471,7 @@ class LabelDesigner(tk.Tk):
             return
         doc.elements = self.elements
         doc.selected_id = self.selected_id
+        doc.selection_ids = list(self.selection_ids)
         doc.layout_locked = self.layout_locked
         doc.current_file = self.current_file
         doc.undo_stack = self.undo_stack
@@ -1993,15 +2488,16 @@ class LabelDesigner(tk.Tk):
         self._stash_document()
         self.doc = doc
         self.elements = doc.elements
-        self.selected_id = doc.selected_id
+        self._set_selection(getattr(doc, "selection_ids", None) or [doc.selected_id], doc.selected_id)
         self.layout_locked = doc.layout_locked
         self.current_file = doc.current_file
         self.undo_stack = doc.undo_stack
         self.redo_stack = doc.redo_stack
         self.doc_dirty = doc.dirty
         self.active_preset_display = doc.active_preset_display
-        self.drag_start = self.drag_origin = None
-        self.resize_state = self.rotate_state = None
+        self.drag_start = self.drag_origin = self.group_origin = None
+        self.resize_state = self.rotate_state = self.marquee = None
+        self.wheel_rotate_state = None
         self._set_label_size(doc.width, doc.height)
         self._render_all()
         self._load_properties()
@@ -2674,6 +3170,7 @@ class LabelDesigner(tk.Tk):
             button.configure(style="SegOn.TButton" if key == name else "Seg.TButton")
         if hasattr(self, "theme_var"):
             self.theme_var.set(name)
+        self._refresh_icons()
         self._refresh_logos()
         self._apply_title_bar_theme()
         state, text = getattr(self, "connection_state", ("checking", "Перевірка підключення…"))
@@ -2688,6 +3185,61 @@ class LabelDesigner(tk.Tk):
     def _cycle_theme(self):
         names = list(THEMES)
         self._set_theme(names[(names.index(self.theme_name) + 1) % len(names)])
+
+    def _icon_set(self, name, size):
+        """(звичайна, неактивна, під курсором) — іконка у кольорах поточної теми."""
+        key = (name, size)
+        images = self.icon_photos.get(key)
+        if images is None:
+            normal = render_icon(name, COLORS["text"], size)
+            faded = render_icon(name, COLORS["muted"], size)
+            faded.putalpha(faded.getchannel("A").point(lambda value: value * 45 // 100))
+            hover = render_icon(name, COLORS["accent"], size)
+            images = tuple(ImageTk.PhotoImage(image) for image in (normal, faded, hover))
+            self.icon_photos[key] = images
+        return images
+
+    def _paint_icon_button(self, button, name, size):
+        normal, faded, hover = self._icon_set(name, size)
+        button.configure(image=(normal, "disabled", faded, "active", hover))
+
+    def _icon_button(self, parent, name, command, tip=None, pack=True, text=None, side="left",
+                     style="Tool.TButton", size=18, padx=1):
+        button = ttk.Button(parent, command=command, style=style, text=text or "",
+                            compound="left" if text else "image")
+        self._paint_icon_button(button, name, size)
+        self.icon_buttons.append((button, name, size))
+        if pack:
+            button.pack(side=side, padx=padx)
+        if tip:
+            ToolTip(button, tip)
+        return button
+
+    def _refresh_icons(self):
+        self.icon_photos = {}
+        alive = []
+        for button, name, size in self.icon_buttons:
+            try:
+                self._paint_icon_button(button, name, size)
+                alive.append((button, name, size))
+            except tk.TclError:
+                pass
+        self.icon_buttons = alive
+        button = getattr(self, "theme_menu_button", None)
+        if button is not None:
+            button.configure(image=self._theme_swatch(self.theme_name, (34, 20)))
+
+    def _poll_history_buttons(self):
+        """Стрілки «назад/вперед» неактивні, коли немає що скасувати чи повторити."""
+        try:
+            state = (bool(self.undo_stack), bool(self.redo_stack))
+            if state != self.history_buttons_state:
+                self.history_buttons_state = state
+                for button, enabled in ((self.undo_button, state[0]), (self.redo_button, state[1])):
+                    button.state(["!disabled"] if enabled else ["disabled"])
+            self.after(250, self._poll_history_buttons)
+        except tk.TclError:
+            pass
 
     @staticmethod
     def _tool_button(parent, text, command, tip=None, style="Tool.TButton", side="left", padx=1):
@@ -2721,6 +3273,10 @@ class LabelDesigner(tk.Tk):
         menu = cascade("Файл")
         menu.add_command(label="Нова вкладка", accelerator="Ctrl+T", command=self._new_tab)
         menu.add_command(label="Відкрити…", accelerator="Ctrl+O", command=self._load_layout)
+        self.recent_menu = self._new_menu(menu)
+        self.recent_menu.configure(postcommand=self._fill_recent_menu)
+        menu.add_cascade(label="Останні файли", menu=self.recent_menu)
+        self._fill_recent_menu()
         menu.add_command(label="Зберегти", accelerator="Ctrl+S", command=self._save_layout)
         menu.add_command(label="Зберегти як…", accelerator="Ctrl+Shift+S", command=self._save_layout_as)
         menu.add_separator()
@@ -2736,6 +3292,12 @@ class LabelDesigner(tk.Tk):
                          command=self._paste_element)
         menu.add_command(label="Дублювати", accelerator="Ctrl+D", command=self._duplicate_selected)
         menu.add_command(label="Видалити", accelerator="Del", command=self._delete_selected)
+        menu.add_separator()
+        menu.add_command(label="Виділити все", accelerator="Ctrl+A", command=self._select_all)
+        menu.add_command(label="Зняти виділення", accelerator="Esc", command=self._deselect)
+        align_menu = self._new_menu(menu)
+        menu.add_cascade(label="Вирівняти вибрані", menu=align_menu)
+        self._fill_align_menu(align_menu)
         menu.add_separator()
         menu.add_command(label="Заблокувати / розблокувати елемент", command=self._toggle_selected_lock)
         menu.add_command(label="Заблокувати / розблокувати макет", command=self._toggle_layout_lock)
@@ -2769,9 +3331,7 @@ class LabelDesigner(tk.Tk):
             menu.add_radiobutton(label=f"Масштаб {level}", value=level, variable=self.zoom_var,
                                  command=self._set_zoom)
         menu.add_separator()
-        for key, theme in THEMES.items():
-            menu.add_radiobutton(label=f"Тема: {theme['title']}", value=key, variable=self.theme_var,
-                                 command=lambda k=key: self._set_theme(k))
+        menu.add_cascade(label="Тема оформлення", menu=self._build_theme_menu(menu))
 
         menu = cascade("Наліпка")
         menu.add_command(label="Пресети розміру…", command=self._open_size_presets_dialog)
@@ -2780,7 +3340,207 @@ class LabelDesigner(tk.Tk):
         menu.add_command(label="Друкувати поточну вкладку", accelerator="Ctrl+P", command=self._print_layout)
         menu.add_command(label="Друк кількох вкладок…", command=self._print_tabs_dialog)
         menu.add_command(label="Серійний друк із CSV…", command=self._batch_print_csv)
+
+        menu = cascade("Довідка")
+        menu.add_command(label="Гарячі клавіші та підказки", accelerator="F1", command=self._show_shortcuts)
         return root
+
+    THEME_ORDER = ("light", "bubblegum", "mint", None, "purple", "black", "cyber", "synthwave", "acid")
+
+    def _theme_swatch(self, key, size=(46, 26)):
+        cache = self.__dict__.setdefault("theme_swatches", {})
+        photo = cache.get((key, size))
+        if photo is None:
+            photo = ImageTk.PhotoImage(render_theme_swatch(THEMES[key], *size))
+            cache[(key, size)] = photo
+        return photo
+
+    def _build_theme_menu(self, parent):
+        """Список тем із мініатюрами — видно, як виглядатиме, ще до вибору."""
+        menu = self._new_menu(parent)
+        order = list(self.THEME_ORDER) + [key for key in THEMES if key not in self.THEME_ORDER]
+        for key in order:
+            if key is None:
+                menu.add_separator()
+                continue
+            menu.add_radiobutton(
+                label=f"  {THEMES[key]['title']}", image=self._theme_swatch(key), compound="left",
+                value=key, variable=self.theme_var, command=lambda k=key: self._set_theme(k),
+            )
+        return menu
+
+    def _fill_align_menu(self, menu):
+        menu.delete(0, "end")
+        for label, mode in (("По лівому краю", "left"), ("По центру ↔", "hcenter"), ("По правому краю", "right"),
+                            ("По верхньому краю", "top"), ("По середині ↕", "vcenter"),
+                            ("По нижньому краю", "bottom")):
+            menu.add_command(label=label, command=lambda m=mode: self._align_selection(m))
+        menu.add_separator()
+        menu.add_command(label="Рівні проміжки ↔", command=lambda: self._distribute_selection("h"))
+        menu.add_command(label="Рівні проміжки ↕", command=lambda: self._distribute_selection("v"))
+
+    # ---- Останні файли -----------------------------------------------------------------
+    def _remember_recent(self, path):
+        try:
+            path = os.path.abspath(str(path))
+        except (TypeError, ValueError):
+            return
+        key = os.path.normcase(path)
+        self.recent_files = [path] + [
+            item for item in self.recent_files if os.path.normcase(os.path.abspath(item)) != key
+        ]
+        del self.recent_files[MAX_RECENT_FILES:]
+        self._save_size_presets()
+        self._fill_recent_menu()
+
+    def _fill_recent_menu(self):
+        menu = getattr(self, "recent_menu", None)
+        if menu is None:
+            return
+        try:
+            menu.delete(0, "end")
+            existing = [path for path in self.recent_files if os.path.isfile(path)]
+            if not existing:
+                menu.add_command(label="Поки порожньо", state="disabled")
+                return
+            for path in existing:
+                folder = Path(path).parent.name
+                menu.add_command(
+                    label=f"{Path(path).name}" + (f"   ·   {folder}" if folder else ""),
+                    command=lambda p=path: self._open_layout_file(p),
+                )
+            menu.add_separator()
+            menu.add_command(label="Очистити список", command=self._clear_recent)
+        except tk.TclError:
+            pass
+
+    def _clear_recent(self):
+        self.recent_files = []
+        self._save_size_presets()
+        self._fill_recent_menu()
+
+    # ---- Довідка ------------------------------------------------------------------------
+    SHORTCUTS = (
+        ("Ctrl+V", "вставити текст, скриншот чи фото з буфера"),
+        ("Ctrl+C · Ctrl+D", "копіювати · дублювати вибране"),
+        ("Delete", "видалити вибране"),
+        ("Ctrl+Z · Ctrl+Y", "скасувати · повторити"),
+        ("Shift/Ctrl + клік", "додати або прибрати елемент з виділення"),
+        ("Рамка мишею", "виділити кілька елементів (з порожнього місця)"),
+        ("Ctrl+A · Esc", "виділити все · зняти виділення"),
+        ("Стрілки", "зсув на 0,1 мм (Shift — 0,5 мм)"),
+        ("Коліщатко над фото", "повернути вибране фото на 1° (Shift — 15°)"),
+        ("Ctrl+R · Ctrl+Shift+R", "повернути на 90° за / проти годинникової"),
+        ("Ctrl + коліщатко", "масштаб перегляду"),
+        ("Подвійний клік", "текст — редагувати, фото — редактор фото"),
+        ("Правий клік", "меню дій для вибраного"),
+        ("Ctrl+T · Ctrl+W · Ctrl+Tab", "нова · закрити · наступна вкладка"),
+        ("Ctrl+O · Ctrl+S · Ctrl+P", "відкрити · зберегти · друк"),
+    )
+
+    def _show_shortcuts(self, _event=None):
+        existing = self.__dict__.get("shortcuts_window")
+        if existing is not None:
+            try:
+                existing.lift()
+                existing.focus_force()
+                return "break"
+            except tk.TclError:
+                pass
+        window = tk.Toplevel(self)
+        self.shortcuts_window = window
+        window.title("Гарячі клавіші")
+        window.transient(self)
+        window.resizable(False, False)
+        window.configure(bg=COLORS["panel"])
+        body = ttk.Frame(window, padding=(18, 14, 18, 14))
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="Гарячі клавіші та підказки", style="Title.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 10)
+        )
+        for row, (keys, text) in enumerate(self.SHORTCUTS, start=1):
+            key_label = tk.Label(body, text=keys, font=(UI_FONT, 9, "bold"), padx=7, pady=2,
+                                 bg=COLORS["accent_soft"], fg=COLORS["accent"])
+            key_label.grid(row=row, column=0, sticky="w", pady=2, padx=(0, 12))
+            ttk.Label(body, text=text).grid(row=row, column=1, sticky="w", pady=2)
+        ttk.Button(body, text="Зрозуміло", style="AccentSmall.TButton", command=window.destroy).grid(
+            row=len(self.SHORTCUTS) + 1, column=0, columnspan=2, sticky="e", pady=(12, 0)
+        )
+
+        def closed(_event=None):
+            if self.__dict__.get("shortcuts_window") is window:
+                self.shortcuts_window = None
+
+        window.bind("<Destroy>", closed, add="+")
+        window.bind("<Escape>", lambda _e: window.destroy())
+        window.bind("<F1>", lambda _e: window.destroy())
+        self.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - window.winfo_reqwidth()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - window.winfo_reqheight()) // 3
+        window.geometry(f"+{max(0, x)}+{max(0, y)}")
+        window.focus_force()
+        return "break"
+
+    # ---- Контекстне меню полотна --------------------------------------------------------
+    def _canvas_context_menu(self, event):
+        self.canvas.focus_set()
+        if self.inline_editor:
+            self._finish_inline_edit(commit=True)
+        self.marquee = None
+        found = None
+        for item in reversed(self.canvas.find_overlapping(event.x, event.y, event.x, event.y)):
+            tags = self.canvas.gettags(item)
+            if "element" in tags:
+                found = next((tag for tag in tags if tag not in ("element", "current")), None)
+                break
+        if found and found not in self.selection_ids:
+            self.selected_id = found
+        elif not found and not self.selection_ids:
+            self.selected_id = None
+        self._draw_selection()
+        self._load_properties()
+        menu = self.context_menu
+        menu.delete(0, "end")
+        chosen = self._selected_elements()
+        if chosen:
+            images = [element for element in chosen if element.get("type") == "image"]
+            menu.add_command(label="Копіювати", accelerator="Ctrl+C", command=self._copy_selected)
+            menu.add_command(label="Дублювати", accelerator="Ctrl+D", command=self._duplicate_selected)
+            menu.add_command(label="Видалити", accelerator="Del", command=self._delete_selected)
+            menu.add_separator()
+            if len(chosen) > 1:
+                menu.add_cascade(label="Вирівняти", menu=self.context_align_menu)
+            else:
+                element = chosen[0]
+                menu.add_command(label="Центрувати на наліпці",
+                                 command=lambda: self._center_selected(horizontal=True, vertical=True))
+                if element.get("type") == "text":
+                    menu.add_command(label="Редагувати текст",
+                                     command=lambda e=element, ev=event: self._start_inline_edit(e, ev))
+            menu.add_command(label="Нагору (над іншими)", command=self._bring_front)
+            locked = all(element.get("locked") for element in chosen)
+            menu.add_command(label="Розблокувати" if locked else "Заблокувати", command=self._toggle_selected_lock)
+            if images:
+                menu.add_separator()
+                menu.add_command(label="Повернути ⟳ 90°", accelerator="Ctrl+R",
+                                 command=lambda: self._rotate_selected(90))
+                menu.add_command(label="Повернути ⟲ 90°", accelerator="Ctrl+Shift+R",
+                                 command=lambda: self._rotate_selected(-90))
+                menu.add_command(label="Віддзеркалити ⇆", command=lambda: self._flip_selected("h"))
+                if len(chosen) == 1:
+                    menu.add_command(label="Редактор фото…", command=self._open_photo_editor)
+        else:
+            menu.add_command(label="Вставити", accelerator="Ctrl+V", command=self._paste_element)
+            menu.add_command(label="Виділити все", accelerator="Ctrl+A", command=self._select_all)
+            menu.add_separator()
+            menu.add_command(label="+ Текст", command=self._add_text)
+            menu.add_command(label="+ Фото…", command=self._add_image)
+            menu.add_command(label="+ QR-код…", command=self._add_qr)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
 
     def _build_header(self):
         """Шапка як у браузері: логотип, вкладки, тема, меню."""
@@ -2794,14 +3554,13 @@ class LabelDesigner(tk.Tk):
         menu_button.pack(side="right", padx=(6, 0), pady=(0, 4))
         menu_button.configure(menu=self._build_menu(menu_button))
         ToolTip(menu_button, "Меню: файл, правка, фото, вигляд, друк")
-        switch = ttk.Frame(header, style="Header.TFrame")
-        switch.pack(side="right", pady=(0, 4))
-        for key, icon in (("light", "☀"), ("purple", "◆"), ("black", "●")):
-            button = ttk.Button(switch, text=icon, style="Seg.TButton", width=3,
-                                command=lambda k=key: self._set_theme(k))
-            button.pack(side="left", padx=1)
-            ToolTip(button, f"Тема «{THEMES[key]['title']}»")
-            self.theme_buttons[key] = button
+        self.theme_menu_button = ttk.Menubutton(
+            header, style="Header.TMenubutton", width=0, image=self._theme_swatch(self.theme_name, (34, 20)),
+            text="Тема", compound="left",
+        )
+        self.theme_menu_button.pack(side="right", pady=(0, 4))
+        self.theme_menu_button.configure(menu=self._build_theme_menu(self.theme_menu_button))
+        ToolTip(self.theme_menu_button, "Тема оформлення: світлі, темні, неонові")
         self._build_tabbar(header)
 
     def _build_ui(self):
@@ -2820,6 +3579,7 @@ class LabelDesigner(tk.Tk):
         self.size_preset_var = tk.StringVar()
         self.size_status_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Готово")
+        self.copies_var = tk.IntVar(value=1)
         self._build_header()
 
         # ---- Панель інструментів (один рядок) --------------------------------------------
@@ -2827,6 +3587,10 @@ class LabelDesigner(tk.Tk):
         toolbar.pack(side="top", fill="x")
         self._tool_button(toolbar, "Друкувати", self._print_layout, "Друкувати поточну вкладку (Ctrl+P)",
                           style="AccentSmall.TButton", side="right", padx=(4, 0))
+        copies = ttk.Spinbox(toolbar, from_=1, to=99, textvariable=self.copies_var, width=3, justify="center")
+        copies.pack(side="right", padx=(2, 0))
+        ToolTip(copies, "Кількість копій")
+        ttk.Label(toolbar, text="×", style="Hint.TLabel").pack(side="right")
         self._separator(toolbar, side="right")
         self._tool_button(toolbar, "⚙", self._open_size_presets_dialog, "Власні розміри наліпок",
                           side="right")
@@ -2847,8 +3611,9 @@ class LabelDesigner(tk.Tk):
             "Ctrl+V — вставити текст або картинку з буфера обміну\n(скриншот, фото, текст, файл зображення)",
         )
         self._separator(toolbar)
-        self._tool_button(toolbar, "↶", self._undo, "Скасувати (Ctrl+Z)")
-        self._tool_button(toolbar, "↷", self._redo, "Повторити (Ctrl+Y)")
+        self.undo_button = self._icon_button(toolbar, "undo", self._undo, "Скасувати (Ctrl+Z)", size=20)
+        self.redo_button = self._icon_button(toolbar, "redo", self._redo, "Повторити (Ctrl+Y)", size=20)
+        self._separator(toolbar)
         self._tool_button(toolbar, "Дубль", self._duplicate_selected, "Дублювати елемент (Ctrl+D)")
         self._tool_button(toolbar, "Видалити", self._delete_selected, "Видалити елемент (Delete)")
         self._line(self, fill="x")
@@ -2919,6 +3684,10 @@ class LabelDesigner(tk.Tk):
         self.canvas.bind("<B1-Motion>", self._canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self._canvas_release)
         self.canvas.bind("<Motion>", self._canvas_motion)
+        self.canvas.bind("<Button-3>", self._canvas_context_menu)
+        self.context_menu = self._new_menu(self.canvas)
+        self.context_align_menu = self._new_menu(self.context_menu)
+        self._fill_align_menu(self.context_align_menu)
         for widget in (self.canvas_view, self.canvas):
             widget.bind("<MouseWheel>", self._mouse_wheel)
             widget.bind("<Control-MouseWheel>", self._mouse_wheel_zoom)
@@ -2956,7 +3725,9 @@ class LabelDesigner(tk.Tk):
             self.empty_hint,
             text=("Кнопки «+ Текст», «+ Фото», «+ QR» — вгорі.\n\n"
                   "Або скопіюйте текст чи картинку\nв будь-якій програмі й натисніть Ctrl+V.\n\n"
-                  "Кілька наліпок — кілька вкладок (Ctrl+T)."),
+                  "Кілька наліпок — кілька вкладок (Ctrl+T).\n"
+                  "Кілька елементів — рамкою мишею або Shift+клік.\n\n"
+                  "F1 — усі гарячі клавіші."),
             style="Hint.TLabel",
             justify="center",
         ).pack(pady=(6, 0))
@@ -3045,7 +3816,8 @@ class LabelDesigner(tk.Tk):
         ttk.Button(angle_row, text="Скинути", command=self._reset_image_transform, style="Tool.TButton").grid(
             row=0, column=2, padx=(6, 0)
         )
-        ttk.Label(self.image_frame, text="Будь-який кут — тягніть круглий маркер ↻ над фото (Shift — 15°)",
+        ttk.Label(self.image_frame, text="Будь-який кут — маркер ↻ над фото або коліщатко миші над ним "
+                                         "(1°, Shift — 15°)",
                   style="Hint.TLabel", wraplength=310).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         actions = ttk.Frame(self.element_panel)
@@ -3064,10 +3836,70 @@ class LabelDesigner(tk.Tk):
             row=4, column=0, sticky="w", pady=(8, 0)
         )
 
+        # Кілька вибраних елементів: вирівнювання, розподіл, спільні дії.
+        self.group_panel = ttk.Frame(props_tab)
+        self.group_panel.grid(row=3, column=0, sticky="nsew")
+        self.group_panel.columnconfigure(0, weight=1)
+        align = ttk.LabelFrame(self.group_panel, text="Вирівняти між собою", padding=8)
+        align.grid(row=0, column=0, sticky="ew")
+        for column, (icon, mode, tip) in enumerate((
+            ("align_left", "left", "По лівому краю"),
+            ("align_hcenter", "hcenter", "По центру (вертикальна вісь)"),
+            ("align_right", "right", "По правому краю"),
+            ("align_top", "top", "По верхньому краю"),
+            ("align_vcenter", "vcenter", "По середині (горизонтальна вісь)"),
+            ("align_bottom", "bottom", "По нижньому краю"),
+        )):
+            button = self._icon_button(align, icon, lambda m=mode: self._align_selection(m), tip, pack=False)
+            button.grid(row=0, column=column, sticky="ew", padx=1)
+            align.columnconfigure(column, weight=1)
+        spread = ttk.Frame(align)
+        spread.grid(row=1, column=0, columnspan=6, sticky="ew", pady=(6, 0))
+        spread.columnconfigure(0, weight=1)
+        spread.columnconfigure(1, weight=1)
+        for column, (icon, axis, text) in enumerate((
+            ("dist_h", "h", "Проміжки ↔"),
+            ("dist_v", "v", "Проміжки ↕"),
+        )):
+            button = self._icon_button(spread, icon, lambda a=axis: self._distribute_selection(a),
+                                       "Рівні проміжки між 3+ елементами", pack=False, text=text)
+            button.grid(row=0, column=column, sticky="ew", padx=1)
+        on_label = ttk.LabelFrame(self.group_panel, text="Групу на наліпці", padding=8)
+        on_label.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        for column, (text, command, tip) in enumerate((
+            ("Центр ↔", lambda: self._align_selection("hcenter", to_label=True), "Групу по центру наліпки"),
+            ("Центр ↕", lambda: self._align_selection("vcenter", to_label=True), "Групу по середині наліпки"),
+            ("Нагору", self._bring_front, "Над іншими елементами"),
+            ("Замок", self._toggle_selected_lock, "Заблокувати / розблокувати всі вибрані"),
+        )):
+            button = ttk.Button(on_label, text=text, command=command, style="Tool.TButton")
+            button.grid(row=0, column=column, sticky="ew", padx=1)
+            ToolTip(button, tip)
+            on_label.columnconfigure(column, weight=1)
+        group_actions = ttk.Frame(self.group_panel)
+        group_actions.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        group_actions.columnconfigure(0, weight=1)
+        group_actions.columnconfigure(1, weight=1)
+        ttk.Button(group_actions, text="Дублювати", style="Tool.TButton", command=self._duplicate_selected).grid(
+            row=0, column=0, sticky="ew", padx=1
+        )
+        ttk.Button(group_actions, text="Видалити", style="Tool.TButton", command=self._delete_selected).grid(
+            row=0, column=1, sticky="ew", padx=1
+        )
+        ttk.Label(
+            self.group_panel,
+            text=("Тягніть будь-який із вибраних — рухається вся група.\n"
+                  "Квадратні маркери — пропорційний розмір групи.\n"
+                  "Shift/Ctrl+клік — додати чи прибрати елемент, Esc — зняти виділення."),
+            style="Hint.TLabel", justify="left", wraplength=310,
+        ).grid(row=3, column=0, sticky="w", pady=(10, 0))
+
         # ---- Вкладка «Шари» ----------------------------------------------------------------
-        ttk.Label(layers_tab, text="Верхній рядок — верхній шар", style="Hint.TLabel").pack(anchor="w", pady=(0, 6))
+        ttk.Label(layers_tab, text="Верхній рядок — верхній шар · Shift/Ctrl — кілька", style="Hint.TLabel").pack(
+            anchor="w", pady=(0, 6)
+        )
         self.layers_list = tk.Listbox(
-            layers_tab, height=8, exportselection=False, relief="flat", borderwidth=0,
+            layers_tab, height=8, exportselection=False, relief="flat", borderwidth=0, selectmode=tk.EXTENDED,
             highlightthickness=1, activestyle="none", font=(UI_FONT, 10),
         )
         self._themed(
@@ -3161,7 +3993,6 @@ class LabelDesigner(tk.Tk):
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 6)
         )
         ttk.Label(job, text="Кількість копій").grid(row=1, column=0, sticky="w")
-        self.copies_var = tk.IntVar(value=1)
         ttk.Spinbox(job, from_=1, to=99, textvariable=self.copies_var, width=8).grid(
             row=1, column=1, sticky="e"
         )
@@ -3215,14 +4046,18 @@ class LabelDesigner(tk.Tk):
             except tk.TclError:
                 pass
         self.bind("<Delete>", self._delete_shortcut)
+        self.bind("<Escape>", self._deselect)
+        self.bind("<F1>", self._show_shortcuts)
         for key in ("<Left>", "<Right>", "<Up>", "<Down>"):
             self.bind(key, self._nudge_selected)
+        self.after(300, self._poll_history_buttons)
 
     def _snapshot(self):
         return {
             "elements": copy.deepcopy(self.elements),
             "layout_locked": bool(self.layout_locked),
             "selected_id": self.selected_id,
+            "selection": list(self.selection_ids),
             "label_width_mm": LABEL_WIDTH_MM,
             "label_height_mm": LABEL_HEIGHT_MM,
         }
@@ -3234,6 +4069,7 @@ class LabelDesigner(tk.Tk):
     def _record_history(self):
         if self.history_suspended:
             return
+        self.wheel_rotate_state = None
         snapshot = self._snapshot()
         if self.undo_stack and self._snapshot_key(self.undo_stack[-1]) == self._snapshot_key(snapshot):
             return
@@ -3243,6 +4079,7 @@ class LabelDesigner(tk.Tk):
         self._mark_dirty()
 
     def _restore_snapshot(self, snapshot):
+        self.wheel_rotate_state = None
         self.history_suspended = True
         try:
             self._finish_inline_edit(commit=False)
@@ -3255,7 +4092,7 @@ class LabelDesigner(tk.Tk):
                 self._set_label_size(*size)
             self.layout_locked = bool(snapshot.get("layout_locked", False))
             candidate = snapshot.get("selected_id")
-            self.selected_id = candidate if any(e.get("id") == candidate for e in self.elements) else None
+            self._set_selection(snapshot.get("selection") or [candidate], candidate)
             self._render_all()
             self._load_properties()
         finally:
@@ -3423,6 +4260,7 @@ class LabelDesigner(tk.Tk):
             return None
         shift = bool(event.state & 0x0001)
         actions = {
+            "a": self._select_all,
             "z": self._undo,
             "y": self._redo,
             "c": self._copy_selected,
@@ -3445,12 +4283,19 @@ class LabelDesigner(tk.Tk):
     def _copy_selected(self, event=None):
         if self._event_in_text_input(event):
             return
-        element = self._element()
-        if element:
-            self.clipboard_element = copy.deepcopy(element)
+        chosen = self._selected_elements()
+        if chosen:
+            self.clipboard_elements = copy.deepcopy(chosen)
             # Кладемо «підпис» у системний буфер: так Ctrl+V знає, що вставляти
-            # саме скопійований елемент, а не текст, скопійований деінде пізніше.
-            if element.get("type") == "text":
+            # саме скопійовані елементи, а не текст, скопійований деінде пізніше.
+            element = chosen[0]
+            if len(chosen) > 1:
+                signature = "\n".join(
+                    str(item.get("text", "")) if item.get("type") == "text"
+                    else f"Елемент наліпки: {self._layer_name(item)[2:].strip()}"
+                    for item in chosen
+                )
+            elif element.get("type") == "text":
                 signature = str(element.get("text", ""))
             else:
                 signature = f"Елемент наліпки: {self._layer_name(element)[2:].strip()}"
@@ -3460,7 +4305,7 @@ class LabelDesigner(tk.Tk):
                 self.clipboard_signature = signature
             except tk.TclError:
                 self.clipboard_signature = None
-            self.status_var.set("Елемент скопійовано")
+            self.status_var.set("Елемент скопійовано" if len(chosen) == 1 else f"Скопійовано елементів: {len(chosen)}")
         return "break" if event else None
 
     def _paste_element(self, event=None):
@@ -3470,13 +4315,13 @@ class LabelDesigner(tk.Tk):
         kind, value = self._read_system_clipboard()
         if kind == "files":
             self._paste_image_files(value)
-        elif kind == "text" and self.clipboard_element and value == self.clipboard_signature:
+        elif kind == "text" and self.clipboard_elements and value == self.clipboard_signature:
             self._paste_internal_element()
         elif kind == "text":
             self._paste_text(value)
         elif kind == "image":
             self._paste_clipboard_image(value)
-        elif self.clipboard_element:
+        elif self.clipboard_elements:
             self._paste_internal_element()
         else:
             self.status_var.set("Буфер обміну порожній: скопіюйте текст або картинку й натисніть Ctrl+V")
@@ -3602,29 +4447,38 @@ class LabelDesigner(tk.Tk):
             self.status_var.set(f"Вставлено зображень: {added}")
 
     def _paste_internal_element(self):
-        if not self.clipboard_element:
+        if not self.clipboard_elements:
             return
         self._record_history()
-        element = copy.deepcopy(self.clipboard_element)
-        element["id"] = uuid.uuid4().hex
-        element["x"] = round(float(element.get("x", 0)) + 1.0, 2)
-        element["y"] = round(float(element.get("y", 0)) + 1.0, 2)
-        element["locked"] = False
-        self.elements.append(element)
-        self.selected_id = element["id"]
+        added = []
+        for source in self.clipboard_elements:
+            element = copy.deepcopy(source)
+            element["id"] = uuid.uuid4().hex
+            element["x"] = round(float(element.get("x", 0)) + 1.0, 2)
+            element["y"] = round(float(element.get("y", 0)) + 1.0, 2)
+            element["locked"] = False
+            self.elements.append(element)
+            added.append(element["id"])
+        # Наступна вставка зсунеться ще на 1 мм — копії не лягають одна на одну.
+        for source in self.clipboard_elements:
+            source["x"] = round(float(source.get("x", 0)) + 1.0, 2)
+            source["y"] = round(float(source.get("y", 0)) + 1.0, 2)
+        self._set_selection(added, added[0])
         self._render_all()
         self._load_properties()
-        self.status_var.set("Елемент вставлено")
+        self.status_var.set("Елемент вставлено" if len(added) == 1 else f"Вставлено елементів: {len(added)}")
 
     def _duplicate_selected(self, event=None):
         if self._event_in_text_input(event):
             return
-        element = self._element()
-        if not element:
+        chosen = self._selected_elements()
+        if not chosen:
             return "break" if event else None
-        self.clipboard_element = copy.deepcopy(element)
+        saved = self.clipboard_elements
+        self.clipboard_elements = copy.deepcopy(chosen)
         self._paste_internal_element()
-        self.status_var.set("Елемент продубльовано")
+        self.clipboard_elements = saved
+        self.status_var.set("Елемент продубльовано" if len(chosen) == 1 else f"Продубльовано елементів: {len(chosen)}")
         return "break" if event else None
 
     def _delete_shortcut(self, event=None):
@@ -3636,15 +4490,16 @@ class LabelDesigner(tk.Tk):
     def _nudge_selected(self, event):
         if self._event_in_text_input(event) or self.inline_editor:
             return
-        element = self._element()
-        if not element or element.get("locked"):
+        movers = [element for element in self._selected_elements() if not element.get("locked")]
+        if not movers:
             return
         step = 0.5 if event.state & 0x0001 else 0.1
         dx = {"Left": -step, "Right": step}.get(event.keysym, 0.0)
         dy = {"Up": -step, "Down": step}.get(event.keysym, 0.0)
         self._record_history()
-        element["x"] = round(float(element["x"]) + dx, 2)
-        element["y"] = round(float(element["y"]) + dy, 2)
+        for element in movers:
+            element["x"] = round(float(element["x"]) + dx, 2)
+            element["y"] = round(float(element["y"]) + dy, 2)
         self._render_all()
         self._load_properties()
         self.status_var.set(f"Зсув: {step:g} мм")
@@ -3717,11 +4572,17 @@ class LabelDesigner(tk.Tk):
             step = -1 if event.delta > 0 else 1
         if event.state & 0x0004:
             return self._zoom_step(-step)
+        # Над вибраним фото коліщатко повертає його (вгору — за годинниковою).
+        if self._wheel_rotate(event, -step, big=bool(event.state & 0x0001)):
+            return "break"
         self.canvas_view.yview_scroll(step, "units")
         return "break"
 
     def _mouse_wheel_horizontal(self, event):
-        self.canvas_view.xview_scroll(-1 if event.delta > 0 else 1, "units")
+        direction = 1 if event.delta > 0 else -1
+        if self._wheel_rotate(event, direction, big=True):
+            return "break"
+        self.canvas_view.xview_scroll(-direction, "units")
         return "break"
 
     def _mouse_wheel_zoom(self, event):
@@ -3874,20 +4735,28 @@ class LabelDesigner(tk.Tk):
         for element in reversed(self.elements):
             self.layer_ids.append(element["id"])
             self.layers_list.insert(tk.END, self._layer_name(element))
+        for element_id in self.selection_ids:
+            if element_id in self.layer_ids:
+                self.layers_list.selection_set(self.layer_ids.index(element_id))
         if self.selected_id in self.layer_ids:
-            index = self.layer_ids.index(self.selected_id)
-            self.layers_list.selection_set(index)
-            self.layers_list.see(index)
+            self.layers_list.see(self.layer_ids.index(self.selected_id))
 
     def _layer_selected(self, _event=None):
+        """Клік — один шар; Shift/Ctrl+клік — кілька шарів одразу."""
         selection = self.layers_list.curselection()
         if not selection:
             return
-        index = selection[0]
-        if index < len(self.layer_ids):
-            self.selected_id = self.layer_ids[index]
-            self._draw_selection()
-            self._load_properties()
+        ids = [self.layer_ids[index] for index in selection if index < len(self.layer_ids)]
+        if not ids:
+            return
+        try:
+            active = self.layer_ids[self.layers_list.index("active")]
+        except (tk.TclError, IndexError):
+            active = None
+        primary = active if active in ids else (self.selected_id if self.selected_id in ids else ids[0])
+        self._set_selection(ids, primary)
+        self._draw_selection()
+        self._load_properties()
 
     def _move_layer(self, direction):
         element = self._element()
@@ -3904,11 +4773,13 @@ class LabelDesigner(tk.Tk):
         self.status_var.set("Порядок шарів змінено")
 
     def _toggle_visibility(self):
-        element = self._element()
-        if not element:
+        chosen = self._selected_elements()
+        if not chosen:
             return
         self._record_history()
-        element["visible"] = not element.get("visible", True)
+        visible = not all(element.get("visible", True) for element in chosen)
+        for element in chosen:
+            element["visible"] = visible
         self._render_all()
         self._load_properties()
         self.status_var.set("Видимість шару змінено")
@@ -4012,36 +4883,44 @@ class LabelDesigner(tk.Tk):
         self.status_var.set("Зображення замінено; позицію та рамку збережено")
 
     def _delete_selected(self):
-        if not self.selected_id:
+        if not self.selection_ids:
             return
+        chosen = set(self.selection_ids)
         self._record_history()
-        self.elements = [e for e in self.elements if e["id"] != self.selected_id]
+        self.elements = [e for e in self.elements if e["id"] not in chosen]
         self.selected_id = None
         self._render_all()
         self._load_properties()
+        if len(chosen) > 1:
+            self.status_var.set(f"Видалено елементів: {len(chosen)}")
 
     def _bring_front(self):
-        element = self._element()
-        if not element:
+        chosen = self._selected_elements()
+        if not chosen:
             return
         self._record_history()
-        self.elements.remove(element)
-        self.elements.append(element)
+        for element in chosen:
+            self.elements.remove(element)
+        self.elements.extend(chosen)
         self._render_all()
 
     def _toggle_selected_lock(self):
-        element = self._element()
-        if not element:
+        chosen = self._selected_elements()
+        if not chosen:
             messagebox.showinfo("Блокування", "Спочатку виберіть елемент")
             return
         self._record_history()
-        element["locked"] = not bool(element.get("locked"))
+        lock = not all(element.get("locked") for element in chosen)
+        for element in chosen:
+            element["locked"] = lock
         self._render_all()
         self._load_properties()
-        self.status_var.set(
-            "Елемент заблоковано від зсуву та зміни розміру"
-            if element["locked"] else "Елемент розблоковано"
-        )
+        if len(chosen) > 1:
+            self.status_var.set(f"Заблоковано елементів: {len(chosen)}" if lock else f"Розблоковано елементів: {len(chosen)}")
+        else:
+            self.status_var.set(
+                "Елемент заблоковано від зсуву та зміни розміру" if lock else "Елемент розблоковано"
+            )
 
     def _toggle_layout_lock(self):
         self._record_history()
@@ -4055,7 +4934,12 @@ class LabelDesigner(tk.Tk):
         )
 
     def _center_selected(self, horizontal=False, vertical=False):
-        """Центрувати вибраний елемент відносно наліпки 50x30 мм."""
+        """Центрувати вибраний елемент (або всю виділену групу) відносно наліпки."""
+        if self._multi():
+            self._align_selection("hcenter" if horizontal else "vcenter", to_label=True)
+            if horizontal and vertical:
+                self._align_selection("vcenter", to_label=True, record=False)
+            return
         element = self._element()
         if not element:
             messagebox.showinfo("Центрування", "Спочатку виберіть текст або зображення")
@@ -4169,6 +5053,9 @@ class LabelDesigner(tk.Tk):
 
     def _draw_selection(self):
         self.canvas.delete("selection")
+        if self._multi():
+            self._draw_group_selection()
+            return
         item = self.canvas_items.get(self.selected_id)
         if not item:
             return
@@ -4239,10 +5126,11 @@ class LabelDesigner(tk.Tk):
             # як Enter або втрата фокуса. Після цього звичайно обробляємо клік:
             # порожнє місце зніме виділення, а інший елемент буде вибрано.
             self._finish_inline_edit(commit=True)
+        additive = bool(event.state & 0x0001) or bool(event.state & 0x0004)
         hits = self.canvas.find_overlapping(event.x, event.y, event.x, event.y)
         for item in reversed(hits):
             tags = self.canvas.gettags(item)
-            if "rotate_handle" in tags and self.selected_id:
+            if "rotate_handle" in tags and self.selected_id and not self._multi():
                 self._start_rotate_drag(event)
                 return
             if "resize_handle" in tags and self.selected_id:
@@ -4250,6 +5138,9 @@ class LabelDesigner(tk.Tk):
                     tag[7:] for tag in tags
                     if tag.startswith("resize_") and tag != "resize_handle"
                 )
+                if self._multi():
+                    self._start_group_resize(direction, event)
+                    return
                 element = self._element()
                 canvas_item = self.canvas_items.get(self.selected_id)
                 bbox = self.canvas.bbox(canvas_item) if canvas_item else None
@@ -4270,17 +5161,47 @@ class LabelDesigner(tk.Tk):
             if "element" in tags:
                 found = next((tag for tag in tags if tag not in ("element", "current")), None)
                 break
-        self.selected_id = found
-        self.drag_start = (event.x, event.y) if found else None
-        element = self._element(found) if found else None
-        self.drag_origin = (
-            (float(element["x"]), float(element["y"])) if element else None
-        )
         self.drag_started = False
         self.drag_history_recorded = False
         self.resize_state = None
         self.rotate_state = None
-        if element and element.get("type") == "text":
+        self.collapse_on_release = None
+        self.marquee = None
+        self.drag_start = None
+        self.drag_origin = None
+        self.group_origin = None
+        if found is None:
+            # Порожнє місце: тягніть рамку, щоб виділити кілька елементів.
+            base = list(self.selection_ids) if additive else []
+            if not additive:
+                self.selected_id = None
+            self.marquee = {"x0": event.x, "y0": event.y, "x1": event.x, "y1": event.y, "base": base}
+            self._draw_selection()
+            self._load_properties()
+            return
+        if additive:
+            ids = list(self.selection_ids)
+            if found in ids:
+                ids.remove(found)
+                self._set_selection(ids)
+                self._draw_selection()
+                self._load_properties()
+                return
+            self._set_selection(ids + [found], found)
+        elif found in self.selection_ids and self._multi():
+            # Клік по елементу групи: можна одразу тягнути всю групу;
+            # якщо відпустити без руху — лишиться вибраним лише він.
+            self._set_selection(self.selection_ids, found)
+            self.collapse_on_release = found
+        else:
+            self.selected_id = found
+        element = self._element(found)
+        self.drag_start = (event.x, event.y)
+        self.drag_origin = (float(element["x"]), float(element["y"])) if element else None
+        self.group_origin = {
+            item["id"]: (float(item["x"]), float(item["y"])) for item in self._selected_elements()
+        }
+        if element and element.get("type") == "text" and not self._multi():
             guard = self.double_click_guard
             if (
                 not guard
@@ -4306,45 +5227,317 @@ class LabelDesigner(tk.Tk):
         return (bbox[2] - bbox[0]) / PX_PER_MM, (bbox[3] - bbox[1]) / PX_PER_MM
 
     def _snap_position(self, element, x, y):
+        width, height = self._element_size_mm(element)
+        x, y, _guides = self._snap_box(x, y, width, height, {element["id"]})
+        return x, y
+
+    def _snap_box(self, x, y, width, height, exclude=()):
+        """Прив’язати рамку (лівий верхній кут x, y; мм) до сітки 0,5 мм, країв і центру наліпки
+        та до країв і центрів інших елементів. Повертає (x, y, лінії-підказки)."""
         if not self.snap_var.get():
-            return x, y
-        # Базова сітка 0,5 мм.
+            return x, y, []
         x = round(x * 2) / 2
         y = round(y * 2) / 2
-        width, height = self._element_size_mm(element)
-        threshold = 0.65
-        x_targets = [
-            0.0,
-            SAFE_MARGIN_MM,
-            (LABEL_WIDTH_MM - width) / 2,
-            LABEL_WIDTH_MM - SAFE_MARGIN_MM - width,
-            LABEL_WIDTH_MM - width,
-        ]
-        y_targets = [
-            0.0,
-            SAFE_MARGIN_MM,
-            (LABEL_HEIGHT_MM - height) / 2,
-            LABEL_HEIGHT_MM - SAFE_MARGIN_MM - height,
-            LABEL_HEIGHT_MM - height,
-        ]
+        x_lines = [0.0, SAFE_MARGIN_MM, LABEL_WIDTH_MM / 2, LABEL_WIDTH_MM - SAFE_MARGIN_MM, LABEL_WIDTH_MM]
+        y_lines = [0.0, SAFE_MARGIN_MM, LABEL_HEIGHT_MM / 2, LABEL_HEIGHT_MM - SAFE_MARGIN_MM, LABEL_HEIGHT_MM]
         for other in self.elements:
-            if other is element or not other.get("visible", True):
+            if other["id"] in exclude or not other.get("visible", True):
                 continue
             other_w, other_h = self._element_size_mm(other)
             ox, oy = float(other.get("x", 0)), float(other.get("y", 0))
-            x_targets.extend(
-                (ox, ox + other_w - width, ox + other_w / 2 - width / 2, ox + other_w, ox - width)
+            x_lines.extend((ox, ox + other_w / 2, ox + other_w))
+            y_lines.extend((oy, oy + other_h / 2, oy + other_h))
+        threshold = 0.65
+        guides = []
+
+        def nearest(position, size, lines):
+            best = None
+            for offset in (0.0, size / 2, size):
+                for line in lines:
+                    distance = abs(position + offset - line)
+                    if distance <= threshold and (best is None or distance < best[0] - 1e-9):
+                        best = (distance, line - offset, line)
+            return best
+
+        best_x = nearest(x, width, x_lines)
+        if best_x:
+            x = best_x[1]
+            guides.append(("v", best_x[2]))
+        best_y = nearest(y, height, y_lines)
+        if best_y:
+            y = best_y[1]
+            guides.append(("h", best_y[2]))
+        return x, y, guides
+
+    def _draw_guides(self, guides=()):
+        """Рожеві лінії, коли елемент «прилип» до центру, краю чи іншого елемента."""
+        self.canvas.delete("guides")
+        width_px = mm_to_px(LABEL_WIDTH_MM)
+        height_px = mm_to_px(LABEL_HEIGHT_MM)
+        for axis, value in guides:
+            position = mm_to_px(value)
+            if axis == "v":
+                self.canvas.create_line(position, 0, position, height_px, fill=GUIDE_COLOR, width=1,
+                                        dash=(4, 3), tags="guides")
+            else:
+                self.canvas.create_line(0, position, width_px, position, fill=GUIDE_COLOR, width=1,
+                                        dash=(4, 3), tags="guides")
+
+    # ---- Кілька елементів: рамка, група, вирівнювання ------------------------------------
+    def _element_box_mm(self, element):
+        width, height = self._element_size_mm(element)
+        x, y = float(element.get("x", 0)), float(element.get("y", 0))
+        return x, y, x + width, y + height
+
+    def _group_box_mm(self, elements):
+        boxes = [self._element_box_mm(element) for element in elements]
+        if not boxes:
+            return None
+        return (min(b[0] for b in boxes), min(b[1] for b in boxes),
+                max(b[2] for b in boxes), max(b[3] for b in boxes))
+
+    def _draw_group_selection(self):
+        chosen = [element for element in self._selected_elements() if element["id"] in self.canvas_items]
+        boxes = []
+        color = COLORS["selection"]
+        for element in chosen:
+            bbox = self.canvas.bbox(self.canvas_items[element["id"]])
+            if not bbox:
+                continue
+            boxes.append(bbox)
+            locked = bool(element.get("locked"))
+            self.canvas.create_rectangle(
+                bbox[0] - 2, bbox[1] - 2, bbox[2] + 2, bbox[3] + 2,
+                outline="#d97706" if locked else color, width=1, dash=(3, 2), tags="selection",
             )
-            y_targets.extend(
-                (oy, oy + other_h - height, oy + other_h / 2 - height / 2, oy + other_h, oy - height)
+        if not boxes:
+            return
+        left = min(b[0] for b in boxes) - 6
+        top = min(b[1] for b in boxes) - 6
+        right = max(b[2] for b in boxes) + 6
+        bottom = max(b[3] for b in boxes) + 6
+        self.canvas.create_rectangle(left, top, right, bottom, outline=color, width=2, tags="selection")
+        count = len(self.selection_ids)
+        badge = f"{count} {plural_objects(count)}"
+        canvas_height = self.canvas.winfo_height() or mm_to_px(LABEL_HEIGHT_MM)
+        if top - 20 >= 0:
+            text_y, anchor = top - 4, "sw"
+        elif bottom + 20 <= canvas_height:
+            text_y, anchor = bottom + 4, "nw"
+        else:
+            text_y, anchor = top + 4, "nw"
+        text = self.canvas.create_text(left + 6, text_y, text=badge, anchor=anchor, fill="#ffffff",
+                                       font=(UI_FONT, 8, "bold"), tags="selection")
+        tb = self.canvas.bbox(text)
+        if tb:
+            pill = self.canvas.create_rectangle(tb[0] - 5, tb[1] - 1, tb[2] + 5, tb[3] + 1, fill=color,
+                                                outline=color, tags="selection")
+            self.canvas.tag_lower(pill, text)
+        if all(element.get("locked") for element in chosen):
+            return
+        middle_x = (left + right) / 2
+        middle_y = (top + bottom) / 2
+        handles = {
+            "nw": (left, top), "n": (middle_x, top), "ne": (right, top),
+            "e": (right, middle_y), "se": (right, bottom),
+            "s": (middle_x, bottom), "sw": (left, bottom), "w": (left, middle_y),
+        }
+        radius = 5
+        for direction, (x, y) in handles.items():
+            self.canvas.create_rectangle(
+                x - radius, y - radius, x + radius, y + radius,
+                fill="#ffffff", outline=color, width=2,
+                tags=("selection", "resize_handle", f"resize_{direction}"),
             )
-        closest_x = min(x_targets, key=lambda target: abs(target - x))
-        closest_y = min(y_targets, key=lambda target: abs(target - y))
-        if abs(closest_x - x) <= threshold:
-            x = closest_x
-        if abs(closest_y - y) <= threshold:
-            y = closest_y
-        return x, y
+
+    def _draw_marquee(self):
+        self.canvas.delete("marquee")
+        state = self.marquee
+        if not state:
+            return
+        x0, y0, x1, y1 = state["x0"], state["y0"], state["x1"], state["y1"]
+        if abs(x1 - x0) < 3 and abs(y1 - y0) < 3:
+            return
+        self.canvas.create_rectangle(x0, y0, x1, y1, outline=COLORS["selection"], width=1, dash=(4, 3),
+                                     tags="marquee")
+
+    def _finish_marquee(self):
+        state = self.marquee
+        self.marquee = None
+        self.canvas.delete("marquee")
+        if not state:
+            return
+        x0, x1 = sorted((state["x0"], state["x1"]))
+        y0, y1 = sorted((state["y0"], state["y1"]))
+        if x1 - x0 < 3 and y1 - y0 < 3:
+            return
+        hit_ids = []
+        for element in self.elements:
+            item = self.canvas_items.get(element["id"])
+            bbox = self.canvas.bbox(item) if item else None
+            if bbox and bbox[0] < x1 and bbox[2] > x0 and bbox[1] < y1 and bbox[3] > y0:
+                hit_ids.append(element["id"])
+        ids = list(state["base"]) + [element_id for element_id in hit_ids if element_id not in state["base"]]
+        self._set_selection(ids, hit_ids[-1] if hit_ids else None)
+        self._draw_selection()
+        self._load_properties()
+        if len(self.selection_ids) > 1:
+            self.status_var.set(
+                f"Вибрано елементів: {len(self.selection_ids)} — тягніть, масштабуйте або вирівнюйте разом"
+            )
+
+    def _start_group_resize(self, direction, event):
+        movers = [element for element in self._selected_elements() if not element.get("locked")]
+        box = self._group_box_mm(movers)
+        if not movers or not box:
+            return
+        self._record_history()
+        self.resize_state = {
+            "group": True,
+            "direction": direction,
+            "box": box,
+            "start": (event.x / PX_PER_MM, event.y / PX_PER_MM),
+            "items": {element["id"]: copy.deepcopy(element) for element in movers},
+        }
+        self.drag_start = None
+        self.group_origin = None
+
+    def _resize_group(self, event):
+        """Пропорційно масштабувати всю групу (тексти — кеглем, фото — рамкою)."""
+        state = self.resize_state
+        left, top, right, bottom = state["box"]
+        direction = state["direction"]
+        cursor_x = event.x / PX_PER_MM
+        cursor_y = event.y / PX_PER_MM
+        start_x, start_y = state["start"]
+        anchor_x = right if "w" in direction else left if "e" in direction else (left + right) / 2
+        anchor_y = bottom if "n" in direction else top if "s" in direction else (top + bottom) / 2
+        # Масштаб рахуємо від точки, де натиснули маркер: без стрибка на початку.
+        factors = []
+        if "e" in direction or "w" in direction:
+            factors.append((cursor_x - anchor_x) / (start_x - anchor_x) if abs(start_x - anchor_x) > 1e-6 else 1.0)
+        if "n" in direction or "s" in direction:
+            factors.append((cursor_y - anchor_y) / (start_y - anchor_y) if abs(start_y - anchor_y) > 1e-6 else 1.0)
+        # Кут: перемагає вісь, яку тягнуть сильніше.
+        scale = max(factors, key=lambda value: abs(value - 1.0)) if factors else 1.0
+        scale = max(0.05, scale)
+        for element in self.elements:
+            original = state["items"].get(element["id"])
+            if original is None:
+                continue
+            element["x"] = round(anchor_x + (float(original["x"]) - anchor_x) * scale, 2)
+            element["y"] = round(anchor_y + (float(original["y"]) - anchor_y) * scale, 2)
+            if element.get("type") == "image":
+                element["width"] = round(max(0.5, float(original["width"]) * scale), 2)
+                element["height"] = round(max(0.5, float(original["height"]) * scale), 2)
+            else:
+                element["size"] = round(max(1.0, float(original["size"]) * scale), 2)
+        self._render_all()
+        self._load_properties()
+        self.status_var.set(f"Масштаб групи: {round(scale * 100)}%")
+
+    def _align_selection(self, mode, to_label=None, record=True):
+        """Вирівняти вибрані елементи: краї/центри між собою (або по наліпці, якщо елемент один)."""
+        chosen = self._selected_elements()
+        movers = [element for element in chosen if not element.get("locked")]
+        if not movers:
+            self.status_var.set("Спочатку виберіть елементи")
+            return
+        if to_label is None:
+            to_label = len(chosen) < 2
+        if to_label:
+            reference = (0.0, 0.0, LABEL_WIDTH_MM, LABEL_HEIGHT_MM)
+        else:
+            reference = self._group_box_mm(chosen)
+        if record:
+            self._record_history()
+        ref_left, ref_top, ref_right, ref_bottom = reference
+        if to_label and len(movers) > 1:
+            # Група цілком: зсуваємо її спільну рамку, взаємне розташування не змінюється.
+            box = self._group_box_mm(movers)
+            dx = dy = 0.0
+            if mode == "left":
+                dx = ref_left - box[0]
+            elif mode == "right":
+                dx = ref_right - box[2]
+            elif mode == "hcenter":
+                dx = (ref_left + ref_right) / 2 - (box[0] + box[2]) / 2
+            elif mode == "top":
+                dy = ref_top - box[1]
+            elif mode == "bottom":
+                dy = ref_bottom - box[3]
+            elif mode == "vcenter":
+                dy = (ref_top + ref_bottom) / 2 - (box[1] + box[3]) / 2
+            for element in movers:
+                element["x"] = round(float(element["x"]) + dx, 2)
+                element["y"] = round(float(element["y"]) + dy, 2)
+        else:
+            for element in movers:
+                left, top, right, bottom = self._element_box_mm(element)
+                width, height = right - left, bottom - top
+                if mode == "left":
+                    element["x"] = round(ref_left, 2)
+                elif mode == "right":
+                    element["x"] = round(ref_right - width, 2)
+                elif mode == "hcenter":
+                    element["x"] = round((ref_left + ref_right) / 2 - width / 2, 2)
+                elif mode == "top":
+                    element["y"] = round(ref_top, 2)
+                elif mode == "bottom":
+                    element["y"] = round(ref_bottom - height, 2)
+                elif mode == "vcenter":
+                    element["y"] = round((ref_top + ref_bottom) / 2 - height / 2, 2)
+        self._render_all()
+        self._load_properties()
+        names = {"left": "ліворуч", "hcenter": "по центру", "right": "праворуч",
+                 "top": "догори", "vcenter": "по середині", "bottom": "донизу"}
+        target = "наліпки" if to_label else "групи"
+        self.status_var.set(f"Вирівняно {names.get(mode, '')} ({target})")
+
+    def _distribute_selection(self, axis):
+        """Рівні проміжки між трьома й більше елементами."""
+        movers = [element for element in self._selected_elements() if not element.get("locked")]
+        if len(movers) < 3:
+            self.status_var.set("Щоб розподілити рівномірно, виберіть щонайменше 3 елементи")
+            return
+        self._record_history()
+        index = 0 if axis == "h" else 1
+        boxes = sorted(((self._element_box_mm(element), element) for element in movers),
+                       key=lambda pair: pair[0][index])
+        start = boxes[0][0][index]
+        end = max(box[index + 2] for box, _element in boxes)
+        total = sum(box[index + 2] - box[index] for box, _element in boxes)
+        gap = (end - start - total) / (len(boxes) - 1)
+        position = start
+        key = "x" if axis == "h" else "y"
+        for box, element in boxes:
+            element[key] = round(position, 2)
+            position += box[index + 2] - box[index] + gap
+        self._render_all()
+        self._load_properties()
+        self.status_var.set("Розподілено рівномірно по ширині" if axis == "h" else "Розподілено рівномірно по висоті")
+
+    def _select_all(self, event=None):
+        if self._event_in_text_input(event) or self.inline_editor:
+            return None
+        ids = [element["id"] for element in self.elements if element.get("visible", True)]
+        self._set_selection(ids, self.selected_id)
+        self._draw_selection()
+        self._load_properties()
+        self.status_var.set(f"Вибрано все: {len(ids)}")
+        return "break"
+
+    def _deselect(self, event=None):
+        if self._event_in_text_input(event) or self.inline_editor:
+            return None
+        if self.marquee is not None:
+            self.marquee = None
+            self.canvas.delete("marquee")
+        if self.selection_ids:
+            self.selected_id = None
+            self._draw_selection()
+            self._load_properties()
+        return "break"
 
     def _canvas_drag(self, event):
         if self.inline_editor:
@@ -4353,12 +5546,22 @@ class LabelDesigner(tk.Tk):
             self._rotate_drag(event)
             return
         if self.resize_state:
-            self._resize_selected(event)
+            if self.resize_state.get("group"):
+                self._resize_group(event)
+            else:
+                self._resize_selected(event)
             return
-        if not self.selected_id or not self.drag_start or not self.drag_origin:
+        if self.marquee is not None:
+            self.marquee["x1"], self.marquee["y1"] = event.x, event.y
+            self._draw_marquee()
             return
-        element = self._element()
-        if not element or element.get("locked"):
+        if not self.selected_id or not self.drag_start or not self.group_origin:
+            return
+        movers = [
+            element for element in self._selected_elements()
+            if not element.get("locked") and element["id"] in self.group_origin
+        ]
+        if not movers:
             return
         dx = event.x - self.drag_start[0]
         dy = event.y - self.drag_start[1]
@@ -4366,20 +5569,46 @@ class LabelDesigner(tk.Tk):
             if dx * dx + dy * dy < DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX:
                 return
             self.drag_started = True
+            self.collapse_on_release = None
             if not self.drag_history_recorded:
                 self._record_history()
                 self.drag_history_recorded = True
-        new_x = self.drag_origin[0] + dx / PX_PER_MM
-        new_y = self.drag_origin[1] + dy / PX_PER_MM
-        new_x, new_y = self._snap_position(element, new_x, new_y)
-        element["x"] = round(new_x, 2)
-        element["y"] = round(new_y, 2)
-        item = self.canvas_items[self.selected_id]
-        self.canvas.coords(item, mm_to_px(element["x"]), mm_to_px(element["y"]))
+        # Уся група рухається разом; прив’язуємо її спільну рамку.
+        boxes = []
+        for element in movers:
+            width, height = self._element_size_mm(element)
+            ox, oy = self.group_origin[element["id"]]
+            boxes.append((ox, oy, ox + width, oy + height))
+        left = min(box[0] for box in boxes)
+        top = min(box[1] for box in boxes)
+        right = max(box[2] for box in boxes)
+        bottom = max(box[3] for box in boxes)
+        new_left, new_top, guides = self._snap_box(
+            left + dx / PX_PER_MM, top + dy / PX_PER_MM, right - left, bottom - top,
+            {element["id"] for element in movers},
+        )
+        shift_x, shift_y = new_left - left, new_top - top
+        for element in movers:
+            ox, oy = self.group_origin[element["id"]]
+            element["x"] = round(ox + shift_x, 2)
+            element["y"] = round(oy + shift_y, 2)
+            item = self.canvas_items.get(element["id"])
+            if item:
+                self.canvas.coords(item, mm_to_px(element["x"]), mm_to_px(element["y"]))
         self._draw_selection()
+        self._draw_guides(guides)
         self._load_properties()
 
     def _canvas_release(self, _event):
+        if self.marquee is not None:
+            self._finish_marquee()
+            return
+        self.canvas.delete("guides")
+        if self.collapse_on_release and not self.drag_started:
+            self.selected_id = self.collapse_on_release
+            self._draw_selection()
+            self._load_properties()
+        self.collapse_on_release = None
         if self.rotate_state:
             self.rotate_state = None
             self._load_properties()
@@ -4390,15 +5619,18 @@ class LabelDesigner(tk.Tk):
                 )
         self.drag_start = None
         self.drag_origin = None
+        self.group_origin = None
         if self.drag_started:
-            self.status_var.set("Елемент переміщено")
+            count = len(self.selection_ids)
+            self.status_var.set("Елемент переміщено" if count <= 1 else f"Переміщено елементів: {count}")
             self._schedule_autosave()
         self.drag_started = False
         self.drag_history_recorded = False
         if self.resize_state:
+            group = self.resize_state.get("group")
             self.resize_state = None
             self._load_properties()
-            self.status_var.set("Розмір елемента змінено")
+            self.status_var.set("Розмір групи змінено" if group else "Розмір елемента змінено")
 
     def _canvas_double_click(self, event):
         """Редагувати текст безпосередньо на полотні, не змінюючи координати."""
@@ -4587,9 +5819,15 @@ class LabelDesigner(tk.Tk):
     def _show_property_frame(self, element_type):
         if element_type is None:
             self.element_panel.grid_remove()
+            self.group_panel.grid_remove()
             self.empty_hint.grid()
             return
         self.empty_hint.grid_remove()
+        if element_type == "group":
+            self.element_panel.grid_remove()
+            self.group_panel.grid()
+            return
+        self.group_panel.grid_remove()
         self.element_panel.grid()
         if element_type == "text":
             self.text_frame.grid()
@@ -4621,6 +5859,13 @@ class LabelDesigner(tk.Tk):
                 self.y_var.set("")
                 self._show_property_frame(None)
                 return
+            if self._multi():
+                count = len(self.selection_ids)
+                box = self._group_box_mm(self._selected_elements())
+                size = f" · {mm_text(box[2] - box[0])}×{mm_text(box[3] - box[1])} мм" if box else ""
+                self.type_var.set(f"{count} {plural_objects(count)}{size}")
+                self._show_property_frame("group")
+                return
             self.x_var.set(str(element["x"]))
             self.y_var.set(str(element["y"]))
             if element["type"] == "text":
@@ -4649,7 +5894,7 @@ class LabelDesigner(tk.Tk):
     def _apply_properties(self, show_error=True):
         self.live_apply_job = None
         element = self._element()
-        if not element:
+        if not element or self._multi():
             return False
         new_rotation = None
         try:
@@ -4765,17 +6010,17 @@ class LabelDesigner(tk.Tk):
         return bool(element.get("photo")) and photo_available() and not self._comparing(element)
 
     def _output_mode(self, element, adjust):
-        """(режим точок: "bw" | "dither" | None, поріг, білий прозорий)."""
+        """(режим: "bw" | None, поріг, білий прозорий)."""
         if self._photo_active(element):
             params = photo_params(element["photo"])
-            return {"bw": "bw", "dots": "dither"}.get(params["mode"]), 128, bool(params["transparent"])
+            return ("bw" if params["mode"] == "bw" else None), 128, bool(params["transparent"])
         if adjust:
-            mode = adjust["mode"] if adjust["mode"] in ("bw", "dither") else None
+            mode = "bw" if adjust["mode"] in ("bw", "dither") else None
             return mode, int(adjust["threshold"]), bool(adjust["white_transparent"])
         return None, 128, False
 
     def _element_bitmap(self, element, fit_box, adjust):
-        """Обробити фото: джерело → поворот/віддзеркалення → вписати в рамку → Ч/Б або точки."""
+        """Обробити фото: джерело → поворот/віддзеркалення → вписати в рамку → Ч/Б."""
         max_side = max(8, round(math.hypot(*fit_box)))
         if self._photo_active(element):
             image = self._photo_output(element).convert("RGBA")
@@ -4891,38 +6136,130 @@ class LabelDesigner(tk.Tk):
         element["x"] = round(center[0] - new_width / 2, 2)
         element["y"] = round(center[1] - new_height / 2, 2)
 
-    def _selected_image_for_transform(self):
-        element = self._element()
-        if not element or element.get("type") != "image":
+    def _transform_targets(self):
+        """Вибрані зображення, які можна повертати (усі, якщо вибрано кілька)."""
+        images = [element for element in self._selected_elements() if element.get("type") == "image"]
+        if not images:
             self.status_var.set("Спочатку виберіть зображення, QR-код або штрихкод")
-            return None
-        if element.get("locked"):
+            return []
+        unlocked = [element for element in images if not element.get("locked")]
+        if not unlocked:
             self.status_var.set("Елемент заблоковано — спочатку розблокуйте його")
-            return None
-        return element
+        return unlocked
+
+    def _selected_image_for_transform(self):
+        targets = self._transform_targets()
+        primary = self._element()
+        return primary if primary in targets else (targets[0] if targets else None)
 
     def _rotate_selected(self, delta, event=None):
         if self._event_in_text_input(event) or self.inline_editor:
             return None
-        element = self._selected_image_for_transform()
-        if element:
+        targets = self._transform_targets()
+        if targets:
             self._record_history()
-            angle = self._normalize_angle(element.get("rotation", 0)) + delta
-            self._set_image_rotation(element, angle)
+            angle = 0.0
+            for element in targets:
+                angle = self._normalize_angle(element.get("rotation", 0)) + delta
+                self._set_image_rotation(element, angle)
             self._render_all()
             self._load_properties()
             self.status_var.set(f"Поворот: {self._normalize_angle(angle):g}°")
         return "break" if event else None
 
+    def _wheel_rotate(self, event, direction, big=False):
+        """Коліщатко над вибраним фото повертає його на 1° (Shift — на 15°).
+
+        Повороти поспіль — це одна дія в історії, і рамка рахується від початкового стану,
+        тож картинка не «пливе» й не змінює розмір від багатьох дрібних кроків.
+        """
+        if self.inline_editor or self.drag_started or self.resize_state or self.rotate_state or self.marquee:
+            return False
+        targets = [
+            element for element in self._selected_elements()
+            if element.get("type") == "image" and not element.get("locked") and element.get("visible", True)
+        ]
+        if not targets:
+            return False
+        try:
+            root_x = getattr(event, "x_root", None)
+            root_y = getattr(event, "y_root", None)
+            if not isinstance(root_x, int) or not isinstance(root_y, int):
+                root_x, root_y = self.winfo_pointerx(), self.winfo_pointery()
+            x = root_x - self.canvas.winfo_rootx()
+            y = root_y - self.canvas.winfo_rooty()
+        except tk.TclError:
+            return False
+        target_ids = {element["id"] for element in targets}
+        hovered = False
+        for item in self.canvas.find_overlapping(x - 2, y - 2, x + 2, y + 2):
+            tags = set(self.canvas.gettags(item))
+            if "rotate_handle" in tags or ("element" in tags and tags & target_ids):
+                hovered = True
+                break
+        if not hovered:
+            return False
+        now = time.monotonic()
+        ids = tuple(sorted(target_ids))
+        state = self.wheel_rotate_state
+        fresh = (
+            not state or state["ids"] != ids or state["doc"] is not self.doc or now - state["time"] > 1.5
+            or any(
+                state["last"].get(element["id"])
+                != (element["x"], element["y"], element["width"], element["height"], element.get("rotation"))
+                for element in targets
+            )
+        )
+        if fresh:
+            self._record_history()
+            state = {
+                "ids": ids,
+                "doc": self.doc,
+                "delta": 0.0,
+                "base": {element["id"]: copy.deepcopy(element) for element in targets},
+                "centers": {
+                    element["id"]: (
+                        float(element["x"]) + float(element["width"]) / 2,
+                        float(element["y"]) + float(element["height"]) / 2,
+                    )
+                    for element in targets
+                },
+            }
+        state["time"] = now
+        state["delta"] += direction * (15.0 if big else 1.0)
+        angle = 0.0
+        for element in targets:
+            base = state["base"][element["id"]]
+            for key in ("x", "y", "width", "height", "preserve_aspect", "rotation"):
+                if key in base:
+                    element[key] = base[key]
+                else:
+                    element.pop(key, None)
+            angle = self._normalize_angle(base.get("rotation", 0)) + state["delta"]
+            if big:
+                angle = round(angle / 15.0) * 15.0
+            self._set_image_rotation(element, angle, center=state["centers"][element["id"]])
+            angle = element["rotation"]
+        state["last"] = {
+            element["id"]: (element["x"], element["y"], element["width"], element["height"], element.get("rotation"))
+            for element in targets
+        }
+        self.wheel_rotate_state = state
+        self._render_all()
+        self._load_properties()
+        self.status_var.set(f"Поворот: {angle:g}° · коліщатко ±1°, Shift+коліщатко ±15°")
+        return True
+
     def _flip_selected(self, axis):
-        element = self._selected_image_for_transform()
-        if not element:
+        targets = self._transform_targets()
+        if not targets:
             return
         self._record_history()
         key = "flip_h" if axis == "h" else "flip_v"
-        # Віддзеркалення відносно екрана: для вже поверненої картинки кут змінює знак.
-        element[key] = not element.get(key)
-        element["rotation"] = self._normalize_angle(-self._normalize_angle(element.get("rotation", 0)))
+        for element in targets:
+            # Віддзеркалення відносно екрана: для вже поверненої картинки кут змінює знак.
+            element[key] = not element.get(key)
+            element["rotation"] = self._normalize_angle(-self._normalize_angle(element.get("rotation", 0)))
         self._render_all()
         self._load_properties()
         self.status_var.set(
@@ -4930,13 +6267,14 @@ class LabelDesigner(tk.Tk):
         )
 
     def _reset_image_transform(self):
-        element = self._selected_image_for_transform()
-        if not element or not self._has_transform(element):
+        targets = [element for element in self._transform_targets() if self._has_transform(element)]
+        if not targets:
             return
         self._record_history()
-        self._set_image_rotation(element, 0)
-        element["flip_h"] = False
-        element["flip_v"] = False
+        for element in targets:
+            self._set_image_rotation(element, 0)
+            element["flip_h"] = False
+            element["flip_v"] = False
         self._render_all()
         self._load_properties()
         self.status_var.set("Поворот і віддзеркалення скинуто")
@@ -5069,6 +6407,7 @@ class LabelDesigner(tk.Tk):
         self.current_file = path
         self._mark_clean()
         self._update_title()
+        self._remember_recent(path)
         self.status_var.set(f"Збережено: {path}")
         return True
 
@@ -5112,6 +6451,9 @@ class LabelDesigner(tk.Tk):
                 self.custom_presets.append({"name": name, "width": width, "height": height})
         if data.get("theme") in THEMES:
             self.theme_name = data["theme"]
+        recent = data.get("recent") or []
+        if isinstance(recent, list):
+            self.recent_files = [str(path) for path in recent if isinstance(path, str)][:MAX_RECENT_FILES]
         saved = data.get("last") or {}
         try:
             last = self._validate_label_size(saved["width"], saved["height"])
@@ -5124,6 +6466,7 @@ class LabelDesigner(tk.Tk):
             "custom": self.custom_presets,
             "last": {"width": LABEL_WIDTH_MM, "height": LABEL_HEIGHT_MM},
             "theme": getattr(self, "theme_name", DEFAULT_THEME),
+            "recent": getattr(self, "recent_files", []),
         }
         try:
             self.presets_path.write_text(
@@ -5459,6 +6802,7 @@ class LabelDesigner(tk.Tk):
         self._mark_clean()
         self._update_title()
         self._ensure_label_fits()
+        self._remember_recent(path)
         self.status_var.set(f"Відкрито: {path}")
         return True
 

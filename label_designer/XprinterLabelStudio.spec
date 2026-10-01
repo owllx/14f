@@ -9,9 +9,11 @@ if os.path.isfile(os.path.join("xprinter_driver", "Xprinter.inf")):
     datas.append(("xprinter_driver", "xprinter_driver"))
 hiddenimports = ["barcode.writer"] + collect_submodules("barcode")
 
-a = Analysis(["label_designer.py"], datas=datas, hiddenimports=hiddenimports)
-# Відеокодек OpenCV (ffmpeg) для фото не потрібен — не пакуємо його (мінус ~26 МБ).
-a.binaries = [entry for entry in a.binaries if "opencv_videoio_ffmpeg" not in entry[0].lower()]
+# Обробка фото працює лише на Pillow — numpy/OpenCV не потрібні (exe ≈ 17 МБ замість ~60 МБ).
+a = Analysis(
+    ["label_designer.py"], datas=datas, hiddenimports=hiddenimports,
+    excludes=["numpy", "cv2", "matplotlib", "scipy", "pandas"],
+)
 pyz = PYZ(a.pure)
 
 exe = EXE(
