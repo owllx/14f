@@ -35,7 +35,7 @@ from pymavlink.dialects.v10 import ardupilotmega as _dialect_v10  # noqa: E402,F
 from pymavlink.dialects.v20 import ardupilotmega as _dialect_v20  # noqa: E402,F401
 
 APP_NAME = "Servo Trim Sync"
-APP_VERSION = "1.6"
+APP_VERSION = "1.7"
 CONFIG_DIR = Path(os.environ.get("APPDATA", tempfile.gettempdir())) / "ServoTrimSync"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 AUTO_SOURCE = "auto"
@@ -53,6 +53,7 @@ SOURCE_TITLES = {
 CONNECTION_PRESETS = (AUTO_SOURCE, MP_SOURCE, MIRROR_SOURCE, "tcp:127.0.0.1:5760")
 RETRY_OPEN_S = 2.0
 SILENT_REOPEN_S = 6.0
+MIDDLE_SETTLE_S = 1.5
 CONFIG_VERSION = 3
 SERVO_CHANNELS = (6, 7, 8, 9, 10)  # програма працює лише з цими виходами
 BAUD_RATES = ("57600", "115200", "921600")
@@ -118,13 +119,23 @@ def find_mission_planner_dirs():
     return found
 
 
-def channel_rules(channel, below, above, low=800, high=2200):
-    """Пара правил «MIN/MAX від TRIM» для одного виходу SERVOn."""
-    source = f"SERVO{channel}_TRIM"
+# ЄДИНІ параметри, які програма взагалі може записати в політник. Перевіряється безпосередньо
+# перед відправкою PARAM_SET — будь-яке інше ім'я відкидається, хоч би звідки воно взялося.
+WRITABLE_PARAMS = frozenset(f"SERVO{channel}_{kind}" for channel in SERVO_CHANNELS for kind in ("MIN", "TRIM", "MAX"))
+MODE_OFFSETS = "offsets"   # MIN = TRIM − відступ, MAX = TRIM + відступ
+MODE_MIDDLE = "middle"     # TRIM = середнє між MIN і MAX
+
+
+def channel_rules(channel, below, above, low=800, high=2200, mode=MODE_OFFSETS):
+    """Правила для одного виходу SERVOn (за режимом)."""
+    trim, minimum, maximum = f"SERVO{channel}_TRIM", f"SERVO{channel}_MIN", f"SERVO{channel}_MAX"
+    if mode == MODE_MIDDLE:
+        return [{"enabled": True, "sources": [minimum, maximum], "target": trim, "mode": "middle",
+                 "low": low, "high": high}]
     return [
-        {"enabled": True, "source": source, "target": f"SERVO{channel}_MIN", "mode": "offset",
+        {"enabled": True, "sources": [trim], "target": minimum, "mode": "offset",
          "value": -abs(int(below)), "low": low, "high": high},
-        {"enabled": True, "source": source, "target": f"SERVO{channel}_MAX", "mode": "offset",
+        {"enabled": True, "sources": [trim], "target": maximum, "mode": "offset",
          "value": abs(int(above)), "low": low, "high": high},
     ]
 
@@ -136,7 +147,7 @@ DEFAULT_CONFIG = {
     "only_disarmed": True,
     "low": 800,
     "high": 2200,
-    "outputs": [{"enabled": True, "channel": channel, "below": 400, "above": 400, "name": ""}
+    "outputs": [{"enabled": True, "channel": channel, "below": 400, "above": 400, "name": "", "mode": "offsets"}
                 for channel in SERVO_CHANNELS],
     "auto": True,
     "autoconnect": True,
@@ -149,12 +160,15 @@ DEFAULT_CONFIG = {
 }
 
 
-def compute_target(rule, source_value):
-    """Нове значення цільового параметра за правилом (з обмеженням меж)."""
-    if rule["mode"] == "fixed":
-        value = float(rule["value"])
+def compute_target(rule, values):
+    """Нове значення цільового параметра за правилом (з обмеженням меж) або None, якщо даних бракує."""
+    sources = [values.get(name) for name in rule["sources"]]
+    if any(value is None for value in sources):
+        return None
+    if rule["mode"] == "middle":
+        value = (float(sources[0]) + float(sources[1])) / 2.0
     else:
-        value = float(source_value) + float(rule["value"])
+        value = float(sources[0]) + float(rule["value"])
     low, high = rule.get("low"), rule.get("high")
     if low not in (None, ""):
         value = max(float(low), value)
@@ -183,6 +197,8 @@ def load_config():
             output.setdefault("enabled", True)
             output.setdefault("below", 400)
             output.setdefault("above", 400)
+            if output.get("mode") not in (MODE_OFFSETS, MODE_MIDDLE):
+                output["mode"] = MODE_OFFSETS
             outputs.append(output)
         config["outputs"] = outputs
         if int(data.get("config_version", 1)) < CONFIG_VERSION:
@@ -342,6 +358,8 @@ class MavWorker(threading.Thread):
         self.last_refresh = 0.0
         self.link_ok = False
         self.pending = {}
+        self.param_types = {}
+        self.deferred = {}
 
     # ---- службове ---------------------------------------------------------------------
     def emit(self, *event):
@@ -384,8 +402,8 @@ class MavWorker(threading.Thread):
             self._request_sources()
         elif kind == "apply_all":
             self._apply_all(command[1] if len(command) > 1 else None, command[2] if len(command) > 2 else False)
-        elif kind == "write_trim":
-            self._write_trim(command[1], command[2], command[3])
+        elif kind == "write_values":
+            self._write_values(command[1], command[2])
 
     # ---- пошук і підключення -----------------------------------------------------------
     def _sources(self):
@@ -425,6 +443,7 @@ class MavWorker(threading.Thread):
         self.wanted = None
         self.link_ok = False
         self.pending.clear()
+        self.deferred.clear()
         self.set_status(False, "Не підключено")
 
     def _drop_master(self, reason):
@@ -442,6 +461,7 @@ class MavWorker(threading.Thread):
             self.log(reason, "error")
         self.link_ok = False
         self.pending.clear()
+        self.deferred.clear()
         self.search_started = time.monotonic()
 
     def _scan(self, now):
@@ -514,6 +534,7 @@ class MavWorker(threading.Thread):
         self.master_source = source
         self.params.clear()
         self.pending.clear()
+        self.deferred.clear()
         self.link_ok = False
         self.last_own_heartbeat = 0.0
 
@@ -523,11 +544,8 @@ class MavWorker(threading.Thread):
         if self.master is None:
             self._scan(now)
             return
-        if now - self.last_own_heartbeat >= 1.0:
-            self.last_own_heartbeat = now
-            self.master.mav.heartbeat_send(
-                mavutil.mavlink.MAV_TYPE_GCS, mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0, 0
-            )
+        # Власний heartbeat не надсилаємо: для читання/запису параметрів він не потрібен,
+        # тож політнику не йде нічого, крім запитів параметрів SERVO і запису дозволених значень.
         for _ in range(200):
             message = self.master.recv_match(blocking=False)
             if message is None:
@@ -538,6 +556,11 @@ class MavWorker(threading.Thread):
             return
         if self.link_ok and now - self.last_refresh > REFRESH_SOURCES_S:
             self._request_sources()
+        for target, (rule, due) in list(self.deferred.items()):
+            if now >= due:
+                del self.deferred[target]
+                if any(rule is active or rule == active for active in self.rules if active["enabled"]):
+                    self._apply_rules([rule])
         self._retry_writes(now)
 
     def _on_message(self, message):
@@ -566,7 +589,9 @@ class MavWorker(threading.Thread):
             name = message.param_id
             if isinstance(name, bytes):
                 name = name.decode(errors="ignore")
-            self._on_param(name.rstrip("\x00"), float(message.param_value))
+            name = name.rstrip("\x00")
+            self.param_types[name] = message.param_type
+            self._on_param(name, float(message.param_value))
 
     def _on_param(self, name, value):
         previous = self.params.get(name)
@@ -577,28 +602,33 @@ class MavWorker(threading.Thread):
             del self.pending[name]
             self.log(f"{name} = {value:g} ✓", "ok")
         changed = previous is not None and abs(previous - value) >= 1e-6
-        rules = [rule for rule in self.rules if rule["enabled"] and name in (rule["source"], rule["target"])]
+        rules = [rule for rule in self.rules
+                 if rule["enabled"] and (name in rule["sources"] or name == rule["target"])]
         if not rules:
             return
-        if changed and any(rule["source"] == name for rule in rules):
+        if changed and any(name in rule["sources"] for rule in rules):
             self.log(f"{name}: {previous:g} → {value:g}")
-        # «Авто» тримає MIN/MAX узгодженими з TRIM: після зміни TRIM, а також одразу після
+        # «Авто» тримає параметри узгодженими: після зміни джерела, а також одразу після
         # підключення, якщо в політнику вже стоять інші значення.
         for rule in rules:
-            source = self.params.get(rule["source"])
-            if source is None:
+            if any(source not in self.params for source in rule["sources"]):
                 continue
-            if rule["target"] not in self.params and not (changed and rule["source"] == name):
-                continue  # чекаємо, поки прочитаємо поточне значення MIN/MAX
-            self._apply_rules([rule], source)
+            if rule["target"] not in self.params and not (changed and name in rule["sources"]):
+                continue  # чекаємо, поки прочитаємо поточне значення цільового параметра
+            if rule["mode"] == "middle" and changed and name in rule["sources"]:
+                # MIN і MAX зазвичай міняють один за одним — чекаємо 1,5 с, щоб не писати проміжний TRIM.
+                self.deferred[rule["target"]] = (rule, time.monotonic() + MIDDLE_SETTLE_S)
+                continue
+            self._apply_rules([rule])
 
     # ---- правила й запис ---------------------------------------------------------------
     def _request_sources(self):
         if self.master is None or not self.link_ok:
             return
         self.last_refresh = time.monotonic()
-        names = {rule["source"] for rule in self.rules if rule["enabled"]}
+        names = {source for rule in self.rules if rule["enabled"] for source in rule["sources"]}
         names |= {rule["target"] for rule in self.rules if rule["enabled"]}
+        names &= WRITABLE_PARAMS  # читаємо лише свої параметри SERVO
         for name in sorted(names):
             self.master.mav.param_request_read_send(self.target[0], self.target[1], name.encode(), -1)
 
@@ -611,26 +641,27 @@ class MavWorker(threading.Thread):
         for rule in (self.rules if rules is None else rules):
             if not rule["enabled"]:
                 continue
-            source = self.params.get(rule["source"])
-            if source is None and rule["mode"] == "offset":
-                self.log(f"{rule['source']} ще не прочитано — пропускаю", "warn")
+            missing = [source for source in rule["sources"] if source not in self.params]
+            if missing:
+                self.log(f"{', '.join(missing)} ще не прочитано — пропускаю", "warn")
                 continue
-            applied += self._apply_rules([rule], source)
+            applied += self._apply_rules([rule])
         if not applied and not quiet:
             self.log("Усе вже відповідає правилам")
 
-    def _write_trim(self, name, value, rules):
-        """Користувач ввів TRIM у програмі: записати TRIM і одразу MIN/MAX."""
+    def _write_values(self, values, rules):
+        """Користувач змінив значення в програмі: записати їх і одразу залежні параметри."""
         if not self.link_ok:
             self.log("Немає зв'язку з політником", "error")
             return
         if self.only_disarmed and self.armed:
             self.log("Апарат заармлений — параметри не змінюю", "warn")
             return
-        self._write(name, value)
-        self._apply_rules(rules, value)
+        for name, value in values.items():
+            self._write(name, value)
+        self._apply_rules(rules, values)
 
-    def _apply_rules(self, rules, source_value):
+    def _apply_rules(self, rules, overrides=None):
         if self.only_disarmed and self.armed:
             now = time.monotonic()
             if now - getattr(self, "last_armed_warning", -100.0) > 20:
@@ -638,8 +669,12 @@ class MavWorker(threading.Thread):
                 self.log("Апарат заармлений — параметри не змінюю", "warn")
             return 0
         written = 0
+        values = dict(self.params)
+        values.update(overrides or {})
         for rule in rules:
-            value = compute_target(rule, source_value)
+            value = compute_target(rule, values)
+            if value is None:
+                continue
             current = self.params.get(rule["target"])
             if current is not None and abs(current - value) < 0.5:
                 continue
@@ -651,6 +686,9 @@ class MavWorker(threading.Thread):
         return written
 
     def _write(self, name, value):
+        if name not in WRITABLE_PARAMS:
+            self.log(f"Заблоковано: {name} — програма змінює лише MIN/TRIM/MAX SERVO6–10", "error")
+            return
         self.pending[name] = {"value": float(value), "attempts": 0, "next": 0.0}
         self.log(f"Записую {name} = {value}")
         self._retry_writes(time.monotonic())
@@ -665,9 +703,12 @@ class MavWorker(threading.Thread):
                 continue
             job["attempts"] += 1
             job["next"] = now + WRITE_RETRY_S
+            if name not in WRITABLE_PARAMS:  # друга, остання перевірка просто перед відправкою
+                del self.pending[name]
+                continue
             self.master.mav.param_set_send(
                 self.target[0], self.target[1], name.encode(), job["value"],
-                mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
+                self.param_types.get(name, mavutil.mavlink.MAV_PARAM_TYPE_REAL32),
             )
 
 
@@ -717,7 +758,6 @@ def plugin_report(installed):
                     "не завантажує плагіни (див. Help → Plugins).", ERR)
         return (f"Плагін скопійовано ({where}).\nЗапустіть Mission Planner — він підхопить плагін.", MUTED)
     packets = int(status.get("packets", "0") or 0)
-    values = int(status.get("servo_values", "0") or 0)
     refreshed = int(status.get("refreshed", "0") or 0)
     seen = int(status.get("controls_seen", "-1") or -1)
     error = status.get("error", "").strip()
@@ -1114,7 +1154,7 @@ class App(tk.Tk):
         table = tk.Frame(self, bg=BG, padx=18, pady=10)
         table.pack(fill="x")
         header = self._row_frame(table)
-        for column, text in enumerate(("", "ВИХІД", "MIN = TRIM −", "TRIM", "MAX = TRIM +", "У ПОЛІТНИКУ")):
+        for column, text in enumerate(("", "ВИХІД", "MIN", "TRIM", "MAX", "У ПОЛІТНИКУ")):
             anchor = "w" if column in (1,) else ("e" if column == 5 else "center")
             self._label(header, text, FAINT, (FONT, 8, "bold"), anchor=anchor).grid(
                 row=0, column=column, sticky="ew", pady=(0, 6))
@@ -1237,7 +1277,7 @@ class App(tk.Tk):
         entry.bind("<FocusOut>", lambda _e: finish(True))
 
     def _build_row(self, parent, index):
-        row = {"index": index, "pending_trim": None, "pending_time": 0.0, "trim_job": None, "apply_job": None}
+        row = {"index": index, "pending": {}, "pending_time": 0.0, "write_job": None, "apply_job": None}
         frame = self._row_frame(parent)
         frame.configure(pady=8)
         row["frame"] = frame
@@ -1249,15 +1289,18 @@ class App(tk.Tk):
         row["title"] = self._label(names, "", TEXT, self.font_strong)
         row["title"].pack(anchor="w")
         row["name"] = self._label(names, "", MUTED, (FONT, 8))
-        row["below"] = self._stepper(frame, lambda d: self._offset_step(index, "below", d),
-                                     lambda v: self._offset_set(index, "below", v), self.font_value, "−")
-        row["below"]["frame"].grid(row=0, column=2)
-        row["trim"] = self._stepper(frame, lambda d: self._trim_step(index, d),
-                                    lambda v: self._trim_set(index, v), self.font_trim)
-        row["trim"]["frame"].grid(row=0, column=3)
-        row["above"] = self._stepper(frame, lambda d: self._offset_step(index, "above", d),
-                                     lambda v: self._offset_set(index, "above", v), self.font_value, "+")
-        row["above"]["frame"].grid(row=0, column=4)
+        row["mode"] = FlatButton(names, "", lambda: self._toggle_mode(index), font=(FONT, 8), padx=4, pady=0,
+                                 fg=MUTED, hover_fg=TEXT,
+                                 tip="Режим виходу (клік — змінити):\n"
+                                     "«± від TRIM» — MIN = TRIM − відступ, MAX = TRIM + відступ\n"
+                                     "«TRIM = середнє» — TRIM = (MIN + MAX) / 2")
+        row["mode"].pack(anchor="w")
+        for column, cell in ((2, "below"), (3, "trim"), (4, "above")):
+            row[cell] = self._stepper(frame, lambda d, c=cell: self._cell_step(index, c, d),
+                                      lambda v, c=cell: self._cell_set(index, c, v),
+                                      self.font_trim if cell == "trim" else self.font_value,
+                                      {"below": "−", "above": "+"}.get(cell, ""))
+            row[cell]["frame"].grid(row=0, column=column)
         result = tk.Frame(frame, bg=BG)
         result.grid(row=0, column=5, sticky="e")
         row["result"] = self._label(result, "—", MUTED, self.font_strong, anchor="e")
@@ -1308,21 +1351,26 @@ class App(tk.Tk):
         self.focus_force()
 
     def _output_status(self, index):
-        """(MIN, TRIM, MAX, стан) для міні-вікна: ok — MIN/MAX за правилом, bad — ні, unknown — немає даних."""
-        output = self._output(index)
-        channel = output["channel"]
-        trim = self._current_trim(index)
-        current_min = self.params.get(f"SERVO{channel}_MIN")
-        current_max = self.params.get(f"SERVO{channel}_MAX")
-        if not self.link_ok or trim is None or current_min is None or current_max is None:
+        """(MIN, TRIM, MAX, стан) для міні-вікна: ok — за правилом, bad — ні, unknown — немає даних."""
+        current_min, trim, current_max = (self._value(index, kind) for kind in ("MIN", "TRIM", "MAX"))
+        if not self.link_ok or None in (current_min, trim, current_max):
             return current_min, trim, current_max, "unknown"
-        if self.rows[index]["pending_trim"] is not None:
+        if self.rows[index]["pending"]:
             return current_min, trim, current_max, "bad"
-        low, high = self.config_data["low"], self.config_data["high"]
-        expected_min = max(low, min(high, round(trim - output["below"])))
-        expected_max = max(low, min(high, round(trim + output["above"])))
-        ok = abs(current_min - expected_min) < 0.5 and abs(current_max - expected_max) < 0.5
-        return current_min, trim, current_max, "ok" if ok else "bad"
+        return current_min, trim, current_max, "ok" if not self._mismatches(index) else "bad"
+
+    def _mismatches(self, index):
+        """{параметр: потрібне значення} для параметрів, що не відповідають правилу."""
+        output = self._output(index)
+        values = {name: value for name, value in self.params.items()}
+        values.update(self.rows[index]["pending"])
+        wrong = {}
+        for rule in self._output_rules(output):
+            expected = compute_target(rule, values)
+            current = self.params.get(rule["target"])
+            if expected is not None and current is not None and abs(current - expected) >= 0.5:
+                wrong[rule["target"]] = expected
+        return wrong
 
     def _update_overlay(self):
         if self.overlay is None:
@@ -1371,7 +1419,7 @@ class App(tk.Tk):
                                     "hover": self.img["pin_on" if pin else "pin_hover"]})
         auto = self.config_data["auto"]
         self.auto_switch.set_images({"normal": self.img["switch_on" if auto else "switch_off"]})
-        self.auto_hint.configure(text="працює у фоні — стежить за TRIM у Mission Planner" if auto
+        self.auto_hint.configure(text="працює у фоні — стежить за змінами SERVO6–10 у Mission Planner" if auto
                                  else "вимкнено — застосування лише кнопкою")
         for step, button in self.step_buttons.items():
             active = step == self.config_data["step"]
@@ -1404,50 +1452,79 @@ class App(tk.Tk):
             return True
         return False
 
-    def _current_trim(self, index):
-        row = self.rows[index]
-        if row["pending_trim"] is not None:
-            return row["pending_trim"]
-        value = self.params.get(f"SERVO{self._output(index)['channel']}_TRIM")
+    def _param(self, index, kind):
+        return f"SERVO{self._output(index)['channel']}_{kind}"
+
+    def _value(self, index, kind):
+        """Значення параметра з урахуванням ще не підтвердженого запису (для показу)."""
+        name = self._param(index, kind)
+        pending = self.rows[index]["pending"]
+        if name in pending:
+            return pending[name]
+        value = self.params.get(name)
         return None if value is None else int(round(value))
 
-    def _trim_step(self, index, direction):
-        self._trim_set(index, None, direction * self.config_data["step"])
+    def _current_trim(self, index):
+        return self._value(index, "TRIM")
 
-    def _trim_set(self, index, value, delta=0):
+    def _cell_step(self, index, cell, direction):
+        delta = direction * self.config_data["step"]
+        output = self._output(index)
+        if output.get("mode") == MODE_MIDDLE:
+            if cell == "trim":
+                self._log("У режимі «TRIM = середнє» TRIM рахується сам — змінюйте MIN і MAX", "warn")
+                return
+            self._param_set(index, "MIN" if cell == "below" else "MAX", None, delta)
+        elif cell == "trim":
+            self._param_set(index, "TRIM", None, delta)
+        else:
+            self._offset_set(index, cell, output[cell] + delta)
+
+    def _cell_set(self, index, cell, value):
+        output = self._output(index)
+        if output.get("mode") == MODE_MIDDLE:
+            if cell == "trim":
+                self._log("У режимі «TRIM = середнє» TRIM рахується сам — змінюйте MIN і MAX", "warn")
+                return
+            self._param_set(index, "MIN" if cell == "below" else "MAX", value)
+        elif cell == "trim":
+            self._param_set(index, "TRIM", value)
+        else:
+            self._offset_set(index, cell, value)
+
+    def _param_set(self, index, kind, value, delta=0):
+        """Змінити SERVOn_<kind> з панелі (записується, коли перестали клацати)."""
         if self._blocked():
             return
         if not self.link_ok:
             self._log("Немає зв'язку з політником — спершу «Підключитися»", "warn")
             return
-        output = self._output(index)
-        base = self._current_trim(index)
+        base = self._value(index, kind)
         if value is None:
             if base is None:
-                self._log(f"SERVO{output['channel']}_TRIM ще не прочитано", "warn")
+                self._log(f"{self._param(index, kind)} ще не прочитано", "warn")
                 return
             value = base + delta
         value = int(max(self.config_data["low"], min(self.config_data["high"], value)))
         row = self.rows[index]
-        row["pending_trim"] = value
+        row["pending"][self._param(index, kind)] = value
         row["pending_time"] = time.monotonic()
-        if row["trim_job"]:
-            self.after_cancel(row["trim_job"])
+        if row["write_job"]:
+            self.after_cancel(row["write_job"])
         # Записуємо, коли перестали клацати: одна зміна замість десятка.
-        row["trim_job"] = self.after(450, lambda: self._commit_trim(index))
+        row["write_job"] = self.after(450, lambda: self._commit(index))
         self._refresh_values()
 
-    def _commit_trim(self, index):
+    def _commit(self, index):
         row = self.rows[index]
-        row["trim_job"] = None
-        value = row["pending_trim"]
-        if value is None:
+        row["write_job"] = None
+        if not row["pending"]:
             return
         output = self._output(index)
-        # TRIM з панелі: MIN/MAX слідом — лише для виходів з галочкою.
+        # Залежні параметри слідом — лише для виходів з галочкою.
         rules = self._output_rules(output) if output["enabled"] else []
         row["pending_time"] = time.monotonic()
-        self.worker.commands.put(("write_trim", f"SERVO{output['channel']}_TRIM", value, rules))
+        self.worker.commands.put(("write_values", dict(row["pending"]), rules))
 
     def _offset_step(self, index, key, direction):
         self._offset_set(index, key, self._output(index)[key] + direction * self.config_data["step"])
@@ -1471,6 +1548,17 @@ class App(tk.Tk):
         if self.link_ok and output["enabled"]:
             self.worker.commands.put(("apply_all", self._output_rules(output), True))
 
+    def _toggle_mode(self, index):
+        output = self._output(index)
+        output["mode"] = MODE_OFFSETS if output.get("mode") == MODE_MIDDLE else MODE_MIDDLE
+        self._log(f"SERVO{output['channel']}: " + ("TRIM = середнє між MIN і MAX" if output["mode"] == MODE_MIDDLE
+                                                   else "MIN/MAX = TRIM ± відступи"))
+        self._send_rules()
+        if output["enabled"] and self.config_data["auto"]:
+            self._apply_output(index)
+        self._refresh_values()
+        self._save_later()
+
     def _toggle_output(self, index):
         output = self._output(index)
         output["enabled"] = not output["enabled"]
@@ -1493,7 +1581,7 @@ class App(tk.Tk):
     # ---- правила ------------------------------------------------------------------------------
     def _output_rules(self, output):
         return channel_rules(output["channel"], output["below"], output["above"],
-                             self.config_data["low"], self.config_data["high"])
+                             self.config_data["low"], self.config_data["high"], output.get("mode", MODE_OFFSETS))
 
     def _rules(self):
         rules = []
@@ -1536,7 +1624,6 @@ class App(tk.Tk):
         self._refresh_values()
 
     def _refresh_values(self):
-        low, high = self.config_data["low"], self.config_data["high"]
         selected = mismatched = 0
         for row in self.rows:
             index = row["index"]
@@ -1553,45 +1640,53 @@ class App(tk.Tk):
                 row["name"].pack(anchor="w")
             else:
                 row["name"].pack_forget()
-            trim_param = self.params.get(f"SERVO{channel}_TRIM")
-            pending = row["pending_trim"] is not None
-            if pending and trim_param is not None and abs(trim_param - row["pending_trim"]) < 0.5 \
-                    and not row["trim_job"]:
-                row["pending_trim"] = None
-                pending = False
-            trim = self._current_trim(index)
+            middle = output.get("mode") == MODE_MIDDLE
+            row["mode"].configure(text="TRIM = середнє" if middle else "± від TRIM")
+            # Запис підтверджено — прибираємо «очікування».
+            for name, value in list(row["pending"].items()):
+                current = self.params.get(name)
+                if current is not None and abs(current - value) < 0.5 and not row["write_job"]:
+                    del row["pending"][name]
+            pending = bool(row["pending"])
             value_color = TEXT if enabled else FAINT
-            row["trim"]["value"].configure(text="—" if trim is None else str(trim),
-                                           fg=WARN if pending else value_color)
-            row["below"]["value"].configure(text=f"−{output['below']}", fg=value_color)
-            row["above"]["value"].configure(text=f"+{output['above']}", fg=value_color)
-            current_min = self.params.get(f"SERVO{channel}_MIN")
-            current_max = self.params.get(f"SERVO{channel}_MAX")
-            if current_min is None or current_max is None:
+            current_min, trim, current_max = (self._value(index, kind) for kind in ("MIN", "TRIM", "MAX"))
+
+            def show(cell, value, param=None, color=value_color):
+                waiting = param is not None and param in row["pending"]
+                row[cell]["value"].configure(text="—" if value is None else str(value), fg=WARN if waiting else color)
+
+            if middle:
+                show("below", current_min, self._param(index, "MIN"))
+                show("trim", trim, self._param(index, "TRIM"), MUTED if enabled else FAINT)
+                show("above", current_max, self._param(index, "MAX"))
+            else:
+                row["below"]["value"].configure(text=f"−{output['below']}", fg=value_color)
+                show("trim", trim, self._param(index, "TRIM"))
+                row["above"]["value"].configure(text=f"+{output['above']}", fg=value_color)
+            if None in (current_min, trim, current_max):
                 row["result"].configure(text="—", fg=FAINT)
                 self._set_state(row, "чекаю дані" if self.link_ok and enabled else "", FAINT)
                 continue
-            row["result"].configure(text=f"{current_min:g} – {current_max:g}")
-            if trim is None:
-                row["result"].configure(fg=MUTED)
-                self._set_state(row, "", FAINT)
-                continue
-            expected_min = max(low, min(high, round(trim - output["below"])))
-            expected_max = max(low, min(high, round(trim + output["above"])))
-            ok = abs(current_min - expected_min) < 0.5 and abs(current_max - expected_max) < 0.5
+            row["result"].configure(text=f"TRIM {trim}" if middle else f"{current_min:g} – {current_max:g}")
+            wrong = self._mismatches(index)
             if not enabled:
                 row["result"].configure(fg=FAINT)
                 self._set_state(row, "не керується", FAINT)
             elif pending:
                 row["result"].configure(fg=WARN)
                 self._set_state(row, "записую…", WARN)
-            elif ok:
+            elif not wrong:
                 row["result"].configure(fg=OK)
                 self._set_state(row, "✓ збігається", OK)
             else:
                 mismatched += 1
                 row["result"].configure(fg=ERR)
-                self._set_state(row, f"треба {expected_min} – {expected_max}", ERR)
+                if middle:
+                    need = f"треба TRIM {next(iter(wrong.values()))}"
+                else:
+                    need = "треба " + " – ".join(str(wrong.get(self._param(index, kind), self._value(index, kind)))
+                                                 for kind in ("MIN", "MAX"))
+                self._set_state(row, need, ERR)
         self._update_overlay()
         if not self.link_ok:
             waiting = self.connected_request
@@ -1921,8 +2016,8 @@ class App(tk.Tk):
                 self.mp_copies = copies
                 refresh = True
         for row in self.rows:
-            if row["pending_trim"] is not None and not row["trim_job"] and now - row["pending_time"] > 6:
-                row["pending_trim"] = None
+            if row["pending"] and not row["write_job"] and now - row["pending_time"] > 6:
+                row["pending"].clear()
                 refresh = True
         if refresh:
             self._refresh_values()

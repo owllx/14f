@@ -26,7 +26,7 @@ namespace ServoTrimSyncRefresh
 {
     public class Plugin : MissionPlanner.Plugin.Plugin
     {
-        private static readonly Regex ServoParam = new Regex(@"^SERVO\d{1,2}_(MIN|MAX|TRIM)$");
+        private static readonly Regex ServoParam = new Regex(@"^SERVO(6|7|8|9|10)_(MIN|MAX|TRIM)$");
         private readonly HashSet<string> pending = new HashSet<string>();
         private MAVLinkInterface port;
         private System.Windows.Forms.Timer timer;
