@@ -39,7 +39,12 @@ namespace ServoTrimSyncRefresh
         private long servoValues;
         private long refreshed;
         private int controlsSeen = -1;
+        private int scanned = -1;
+        private string candidateTypes = "";
+        private string pages = "";
+        private DateTime lastScan = DateTime.MinValue;
         private string lastError = "";
+        private static readonly Dictionary<Type, PropertyInfo> ParamNameProperty = new Dictionary<Type, PropertyInfo>();
 
         public override string Name { get { return "Servo Trim Sync — live SERVO MIN/TRIM/MAX"; } }
         public override string Version { get { return "1.0"; } }
@@ -115,45 +120,143 @@ namespace ServoTrimSyncRefresh
                 List<string> names;
                 lock (pending)
                 {
-                    if (pending.Count == 0)
-                        return;
                     names = pending.ToList();
                     pending.Clear();
                 }
+                var periodic = (DateTime.Now - lastScan).TotalSeconds >= 2;
+                if (names.Count == 0 && !periodic)
+                    return;
+                lastScan = DateTime.Now;
 
                 var parameters = MainV2.comPort.MAV.param;
                 var wanted = new HashSet<string>(names.Where(n => parameters.ContainsKey(n)));
-                if (wanted.Count == 0)
-                    return;
 
+                // Обходимо всі вікна MP і шукаємо поля, прив'язані до SERVOn_MIN/TRIM/MAX —
+                // за властивістю ParamName або за назвою елемента (будь-якого типу, бо збірки MP різняться).
                 var seen = 0;
-                foreach (Form form in Application.OpenForms.Cast<Form>().ToList())
+                var total = 0;
+                var types = new HashSet<string>();
+                var pageTypes = new HashSet<string>();
+                foreach (var root in Roots())
                 {
-                    foreach (var control in AllControls(form))
+                    foreach (var control in AllControls(root))
                     {
-                        var number = control as MavlinkNumericUpDown;
-                        if (number != null)
+                        total++;
+                        var typeName = control.GetType().Name;
+                        if (typeName.IndexOf("Output", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            typeName.IndexOf("Servo", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            typeName.IndexOf("RawParam", StringComparison.OrdinalIgnoreCase) >= 0)
+                            pageTypes.Add(typeName);
+                        if (typeName == "ConfigRawParams")
                         {
-                            if (number.ParamName != null && ServoParam.IsMatch(number.ParamName))
-                                seen++;
-                            if (RefreshNumber(number, wanted, parameters))
-                                refreshed++;
+                            if (wanted.Count > 0)
+                                refreshed += RefreshRawParams(control, wanted, parameters);
                             continue;
                         }
-                        if (control.GetType().Name == "ConfigRawParams")
-                        {
-                            seen++;
-                            refreshed += RefreshRawParams(control, wanted, parameters);
-                        }
+                        var param = BoundParam(control);
+                        if (param == null)
+                            continue;
+                        seen++;
+                        types.Add(control.GetType().FullName);
+                        if (wanted.Contains(param) && RefreshControl(control, param, parameters))
+                            refreshed++;
                     }
                 }
                 controlsSeen = seen;
+                scanned = total;
+                candidateTypes = string.Join(",", types.Take(4));
+                pages = string.Join(",", pageTypes.Take(6));
                 WriteStatus();
             }
             catch (Exception ex)
             {
                 lastError = "refresh: " + ex.Message;
             }
+        }
+
+        private static IEnumerable<Control> Roots()
+        {
+            var roots = new List<Control>();
+            try
+            {
+                if (MainV2.instance != null)
+                    roots.Add(MainV2.instance);
+            }
+            catch
+            {
+            }
+            foreach (Form form in Application.OpenForms.Cast<Form>().ToList())
+                if (!roots.Contains(form))
+                    roots.Add(form);
+            return roots;
+        }
+
+        private static string BoundParam(Control control)
+        {
+            var type = control.GetType();
+            PropertyInfo property;
+            if (!ParamNameProperty.TryGetValue(type, out property))
+            {
+                property = type.GetProperty("ParamName", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (property != null && property.PropertyType != typeof(string))
+                    property = null;
+                ParamNameProperty[type] = property;
+            }
+            string name = null;
+            if (property != null)
+            {
+                try
+                {
+                    name = property.GetValue(control, null) as string;
+                }
+                catch
+                {
+                }
+            }
+            if (name == null || !ServoParam.IsMatch(name))
+                name = control.Name;
+            return name != null && ServoParam.IsMatch(name) ? name : null;
+        }
+
+        private static bool RefreshControl(Control control, string param, MAVLink.MAVLinkParamList parameters)
+        {
+            var value = (decimal)(float)parameters[param];
+            // Не заважаємо, лише поки людина саме вводить число в це поле (текст ще не збігається зі значенням).
+            var typing = control as UpDownBase;
+            if (typing != null && control.ContainsFocus && control is NumericUpDown &&
+                typing.Text != ((NumericUpDown)control).Value.ToString(System.Globalization.CultureInfo.CurrentCulture)
+                && typing.Text != ((NumericUpDown)control).Value.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                return false;
+            if (control is TextBoxBase && control.ContainsFocus)
+                return false;
+            var number = control as MavlinkNumericUpDown;
+            if (number != null)
+            {
+                if (number.Value == value)
+                    return false;
+                // setup() перечитує значення з MP без запису в політник.
+                number.setup(800, 2200, 1, 1, param, parameters);
+                return true;
+            }
+            var numeric = control as NumericUpDown;
+            if (numeric != null)
+            {
+                if (numeric.Value == value)
+                    return false;
+                if (value < numeric.Minimum)
+                    numeric.Minimum = value;
+                if (value > numeric.Maximum)
+                    numeric.Maximum = value;
+                numeric.Value = value; // те саме значення, що вже в політнику — повторний запис нешкідливий
+                return true;
+            }
+            var text = ((float)parameters[param]).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if ((control is TextBox || control is Label) && control.Text != text)
+            {
+                control.Text = text;
+                return true;
+            }
+            return false;
         }
 
         private void WriteStatus()
@@ -163,9 +266,10 @@ namespace ServoTrimSyncRefresh
             {
                 File.WriteAllText(StatusPath, string.Format(
                     "loaded={0:o}\nnow={1:o}\nsubscribed={2}\npackets={3}\nservo_values={4}\nrefreshed={5}\n" +
-                    "controls_seen={6}\nerror={7}\n",
+                    "controls_seen={6}\nscanned={7}\ntypes={8}\npages={9}\nerror={10}\n",
                     loadedAt, DateTime.Now, port != null, Interlocked.Read(ref packets),
-                    Interlocked.Read(ref servoValues), refreshed, controlsSeen, lastError.Replace("\n", " ")));
+                    Interlocked.Read(ref servoValues), refreshed, controlsSeen, scanned, candidateTypes, pages,
+                    lastError.Replace("\n", " ")));
             }
             catch
             {
@@ -180,19 +284,6 @@ namespace ServoTrimSyncRefresh
                 foreach (var grandchild in AllControls(child))
                     yield return grandchild;
             }
-        }
-
-        private static bool RefreshNumber(MavlinkNumericUpDown number, HashSet<string> wanted,
-            MAVLink.MAVLinkParamList parameters)
-        {
-            if (number.ParamName == null || !wanted.Contains(number.ParamName) || number.ContainsFocus)
-                return false;
-            var value = (decimal)(float)parameters[number.ParamName];
-            if (number.Value == value)
-                return false;
-            // setup() перечитує значення з MP без запису в політник (так само будує сторінку Servo Output).
-            number.setup(800, 2200, 1, 1, number.ParamName, parameters);
-            return true;
         }
 
         private static int RefreshRawParams(Control page, HashSet<string> wanted, MAVLink.MAVLinkParamList parameters)

@@ -35,7 +35,7 @@ from pymavlink.dialects.v10 import ardupilotmega as _dialect_v10  # noqa: E402,F
 from pymavlink.dialects.v20 import ardupilotmega as _dialect_v20  # noqa: E402,F401
 
 APP_NAME = "Servo Trim Sync"
-APP_VERSION = "1.5"
+APP_VERSION = "1.6"
 CONFIG_DIR = Path(os.environ.get("APPDATA", tempfile.gettempdir())) / "ServoTrimSync"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 AUTO_SOURCE = "auto"
@@ -723,10 +723,14 @@ def plugin_report(installed):
     error = status.get("error", "").strip()
     if packets == 0:
         text, color = "Плагін працює, але ще не бачить пакетів від політника", WARN
-    elif values and seen == 0:
-        text, color = ("Плагін працює, але не знайшов полів SERVO —\nвідкрийте в MP сторінку Servo Output", WARN)
+    elif seen == 0:
+        pages = status.get("pages", "").strip()
+        text, color = ("Плагін працює, але зараз не бачить полів SERVO —\nвідкрийте в MP сторінку Servo Output"
+                       f" (переглянуто елементів: {status.get('scanned', '?')}"
+                       + (f"; сторінки: {pages}" if pages else "") + ")", WARN)
     else:
-        text, color = f"✓ Плагін працює · отримано значень SERVO: {values} · оновлено полів: {refreshed}", OK
+        text, color = (f"✓ Плагін працює · бачить полів SERVO: {seen} · оновлено: {refreshed}\n"
+                       f"({status.get('types', '')})", OK)
     if error:
         text += f"\nПомилка плагіна: {error[:120]}"
         color = ERR
