@@ -15,12 +15,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "label_designer"))
 import label_designer as ld  # noqa: E402  (логотип: маски шестерні й блискавки)
 
-TEXT = "#e8ebf0"
-MUTED = "#7f8796"
-LINE = "#2a303b"
-ACCENT = "#22d3ee"
-VIOLET = "#7c3aed"
-CYAN = "#06b6d4"
+TEXT = "#e6e8eb"
+MUTED = "#5d646e"
+BG = "#0b0d10"
+RED_LIGHT = "#ff6b6b"
+RED = "#e5484d"
+RED_DARK = "#a3171f"
+GREEN = "#2ea043"
 SCALE = 4
 
 
@@ -58,7 +59,7 @@ def logo(size):
     layer = Image.new("RGBA", (big, big), TEXT)
     layer.putalpha(gear)
     result.alpha_composite(layer)
-    layer = gradient((big, big), "#a78bfa", ACCENT)
+    layer = gradient((big, big), RED_LIGHT, RED_DARK)
     layer.putalpha(bolt)
     result.alpha_composite(layer)
     return finish(result, size, size)
@@ -69,15 +70,12 @@ def checkbox(state):
     image, draw = canvas(size, size)
     box = (1 * SCALE, 1 * SCALE, 17 * SCALE - 1, 17 * SCALE - 1)
     if state == "on":
-        fill = gradient((image.width, image.height), VIOLET, CYAN)
-        mask = Image.new("L", image.size, 0)
-        ImageDraw.Draw(mask).rounded_rectangle(box, radius=5 * SCALE, fill=255)
-        image.paste(fill, (0, 0), mask)
-        draw.line([(4.6 * SCALE, 9.2 * SCALE), (7.6 * SCALE, 12.2 * SCALE), (13.4 * SCALE, 5.8 * SCALE)],
-                  fill="#ffffff", width=round(2.2 * SCALE), joint="curve")
+        draw.rounded_rectangle(box, radius=4 * SCALE, fill=TEXT)
+        draw.line([(4.8 * SCALE, 9.2 * SCALE), (7.7 * SCALE, 12.1 * SCALE), (13.2 * SCALE, 6.0 * SCALE)],
+                  fill=BG, width=round(2.2 * SCALE), joint="curve")
     else:
-        color = "#56607a" if state == "hover" else "#3a4250"
-        draw.rounded_rectangle(box, radius=5 * SCALE, outline=color, width=round(1.6 * SCALE))
+        color = "#6b7380" if state == "hover" else "#353b44"
+        draw.rounded_rectangle(box, radius=4 * SCALE, outline=color, width=round(1.5 * SCALE))
     return finish(image, size, size)
 
 
@@ -88,34 +86,23 @@ def switch(on):
     mask = Image.new("L", image.size, 0)
     ImageDraw.Draw(mask).rounded_rectangle(box, radius=height * SCALE // 2, fill=255)
     if on:
-        image.paste(gradient(image.size, VIOLET, CYAN), (0, 0), mask)
+        image.paste(Image.new("RGBA", image.size, GREEN), (0, 0), mask)
         knob_x = width - 10
     else:
-        image.paste(Image.new("RGBA", image.size, "#2a303b"), (0, 0), mask)
+        image.paste(Image.new("RGBA", image.size, "#262b33"), (0, 0), mask)
         knob_x = 10
     r = 7 * SCALE
     cx, cy = knob_x * SCALE, height * SCALE // 2
-    draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill="#ffffff" if on else "#9aa3b2")
+    draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill="#ffffff" if on else "#8a919b")
     return finish(image, width, height)
 
 
 def button(width, height, state):
     image, _draw = canvas(width, height)
     mask = Image.new("L", image.size, 0)
-    ImageDraw.Draw(mask).rounded_rectangle((0, 0, image.width - 1, image.height - 1), radius=10 * SCALE, fill=255)
-    if state == "disabled":
-        fill = Image.new("RGBA", image.size, "#262b35")
-    else:
-        start, end = {"normal": (VIOLET, CYAN), "hover": ("#8b5cf6", "#22d3ee"),
-                      "down": ("#6d28d9", "#0891b2")}[state]
-        fill = gradient(image.size, start, end)
-    image.paste(fill, (0, 0), mask)
-    if state != "disabled":
-        # Ледь помітний світлий верхній край — кнопка «скляна», а не пласка.
-        shine = Image.new("RGBA", image.size, (255, 255, 255, 0))
-        ImageDraw.Draw(shine).rounded_rectangle((0, 0, image.width - 1, image.height // 2), radius=10 * SCALE,
-                                                fill=(255, 255, 255, 22))
-        image.alpha_composite(Image.composite(shine, Image.new("RGBA", image.size, (0, 0, 0, 0)), mask))
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, image.width - 1, image.height - 1), radius=8 * SCALE, fill=255)
+    color = {"normal": TEXT, "hover": "#ffffff", "down": "#c4c9cf", "disabled": "#1a1e24"}[state]
+    image.paste(Image.new("RGBA", image.size, color), (0, 0), mask)
     return finish(image, width, height)
 
 
@@ -132,13 +119,24 @@ def icon(name, color, size=18):
         draw.polygon([p(9, 5), p(15, 5), p(16.2, 12), p(7.8, 12)], fill=color)
         draw.rounded_rectangle((*p(5.5, 11.6), *p(18.5, 14)), radius=1.2 * unit, fill=color)
         draw.line([p(12, 14), p(12, 21.5)], fill=color, width=stroke)
+    elif name == "pip":
+        draw.rounded_rectangle((*p(2.5, 4.5), *p(21.5, 19.5)), radius=2.2 * unit, outline=color, width=stroke)
+        draw.rounded_rectangle((*p(11.5, 11), *p(18.5, 16.5)), radius=1.2 * unit, fill=color)
+    elif name == "close":
+        draw.line([p(6.5, 6.5), p(17.5, 17.5)], fill=color, width=stroke)
+        draw.line([p(17.5, 6.5), p(6.5, 17.5)], fill=color, width=stroke)
     elif name == "tune":
         for y, knob in ((6, 15.5), (12, 8.5), (18, 13)):
             draw.line([p(3.5, y), p(20.5, y)], fill=color, width=stroke)
             r = 2.7 * unit
             cx, cy = p(knob, y)
-            draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill="#0d0f13", outline=color, width=stroke)
+            draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=BG, outline=color, width=stroke)
     return finish(image, size, size)
+
+
+def app_icon(size):
+    """Іконка на панелі задач: той самий логотип на червоній плитці."""
+    return ld.render_app_icon(size, start="#f05252", end="#9b1c1c")
 
 
 def png_b64(image):
@@ -150,9 +148,9 @@ def png_b64(image):
 def main():
     assets = {
         "logo": logo(34),
-        "icon16": ld.render_app_icon(16),
-        "icon32": ld.render_app_icon(32),
-        "icon64": ld.render_app_icon(64),
+        "icon16": app_icon(16),
+        "icon32": app_icon(32),
+        "icon64": app_icon(64),
         "check_on": checkbox("on"),
         "check_off": checkbox("off"),
         "check_hover": checkbox("hover"),
@@ -160,12 +158,17 @@ def main():
         "switch_off": switch(False),
         "pin_off": icon("pin", MUTED),
         "pin_hover": icon("pin", TEXT),
-        "pin_on": icon("pin", ACCENT),
+        "pin_on": icon("pin", RED),
+        "pip_off": icon("pip", MUTED),
+        "pip_hover": icon("pip", TEXT),
+        "pip_on": icon("pip", RED),
         "tune": icon("tune", MUTED),
         "tune_hover": icon("tune", TEXT),
+        "close": icon("close", MUTED, 14),
+        "close_hover": icon("close", TEXT, 14),
     }
     for state in ("normal", "hover", "down", "disabled"):
-        assets[f"primary_{state}"] = button(250, 40, state)
+        assets[f"primary_{state}"] = button(252, 38, state)
     lines = [
         '"""Вбудована графіка Servo Trim Sync (PNG у base64). Згенеровано make_assets.py — не редагуйте вручну."""',
         "",
@@ -180,7 +183,7 @@ def main():
     lines.append("}")
     with open(os.path.join(HERE, "assets.py"), "w", encoding="utf-8", newline="\n") as handle:
         handle.write("\n".join(lines) + "\n")
-    icon_image = ld.render_app_icon(256)
+    icon_image = app_icon(256)
     icon_image.save(os.path.join(HERE, "app.ico"), sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (256, 256)])
     preview = Image.new("RGBA", (640, 120), "#0d0f13")
     x = 10

@@ -35,6 +35,7 @@ from pymavlink.dialects.v10 import ardupilotmega as _dialect_v10  # noqa: E402,F
 from pymavlink.dialects.v20 import ardupilotmega as _dialect_v20  # noqa: E402,F401
 
 APP_NAME = "Servo Trim Sync"
+APP_VERSION = "1.4"
 CONFIG_DIR = Path(os.environ.get("APPDATA", tempfile.gettempdir())) / "ServoTrimSync"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 AUTO_SOURCE = "auto"
@@ -51,6 +52,7 @@ SOURCE_TITLES = {
 }
 CONNECTION_PRESETS = (AUTO_SOURCE, MP_SOURCE, MIRROR_SOURCE, "tcp:127.0.0.1:5760")
 RETRY_OPEN_S = 2.0
+SILENT_REOPEN_S = 6.0
 CONFIG_VERSION = 2
 BAUD_RATES = ("57600", "115200", "921600")
 HEARTBEAT_TIMEOUT = 5.0
@@ -141,6 +143,8 @@ DEFAULT_CONFIG = {
     "topmost": False,
     "show_log": False,
     "geometry": "",
+    "overlay": False,
+    "overlay_pos": "",
 }
 
 
@@ -311,6 +315,7 @@ class MavWorker(threading.Thread):
         self.links = {}               # відкриті кандидати, поки шукаємо
         self.next_try = {}
         self.failures = {}
+        self.link_heard = {}
         self.master = None
         self.master_source = None
         self.search_started = 0.0
@@ -441,19 +446,25 @@ class MavWorker(threading.Thread):
                     self.failures[source] = exc
                     continue
                 self.links[source] = link
+                self.link_heard[source] = now
                 self.failures.pop(source, None)
             try:
                 for _ in range(200):
                     message = link.recv_match(blocking=False)
                     if message is None:
                         break
+                    self.link_heard[source] = now
                     if self._vehicle_heartbeat(message):
                         self._lock(source, link)
                         self._on_message(message)
                         return
+                if source == MP_SOURCE and now - self.link_heard.get(source, now) > SILENT_REOPEN_S:
+                    # Mission Planner прив'язує потік до свого поточного підключення. Якщо MP
+                    # перепідключився (новий порт/об'єкт), старий потік мовчить — відкриваємо заново.
+                    raise ConnectionError("Mission Planner мовчить — перепідключаюся")
             except Exception as exc:
                 self.failures[source] = exc
-                self.next_try[source] = now + RETRY_OPEN_S
+                self.next_try[source] = now + (0.3 if isinstance(exc, ConnectionError) else RETRY_OPEN_S)
                 try:
                     link.close()
                 except Exception:
@@ -463,7 +474,7 @@ class MavWorker(threading.Thread):
 
     def _search_text(self, now):
         auto = self.wanted[0] == AUTO_SOURCE
-        if MP_SOURCE in self.links:
+        if MP_SOURCE in self.links or "мовчить" in str(self.failures.get(MP_SOURCE, "")):
             return "Mission Planner відкрито — чекаю політник"
         if not auto:
             failure = self.failures.get(self.wanted[0])
@@ -649,20 +660,51 @@ class MavWorker(threading.Thread):
 
 
 # ---- Вигляд: темний мінімалістичний, у фірмових кольорах логотипу -------------------------
-BG = "#0d0f13"
-SURFACE = "#14171d"
-RAISED = "#1b1f27"
-LINE = "#222731"
-TEXT = "#e8ebf0"
-MUTED = "#7f8796"
-FAINT = "#4f5664"
-ACCENT = "#22d3ee"
-OK = "#34d399"
-WARN = "#fbbf24"
-ERR = "#f87171"
+# Стримана «інструментальна» палітра: графіт, білий для активного, червоний — лише фірмовий знак.
+BG = "#0b0d10"
+SURFACE = "#12151a"
+RAISED = "#1a1e24"
+LINE = "#1f242b"
+TEXT = "#e6e8eb"
+MUTED = "#8a919b"
+FAINT = "#4d545e"
+ACCENT = "#e6e8eb"
+BRAND = "#e5484d"
+OK = "#3fb950"
+WARN = "#d29922"
+ERR = "#f85149"
 FONT = "Segoe UI"
 STEPS = (1, 5, 10, 25, 50)
 COLUMNS = (30, 112, 118, 128, 118, 118)  # галочка, вихід, MIN, TRIM, MAX, у політнику
+
+
+def dark_title_bar(window):
+    """Windows 10/11: темний заголовок вікна в кольорі програми (замість світлої смуги)."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        window.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
+        dark = ctypes.c_int(1)
+        for attribute in (20, 19):  # DWMWA_USE_IMMERSIVE_DARK_MODE (нові / старі збірки)
+            if ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attribute, ctypes.byref(dark),
+                                                          ctypes.sizeof(dark)) == 0:
+                break
+        for attribute, color in ((35, BG), (36, TEXT), (34, LINE)):  # колір заголовка, тексту, рамки (Win 11)
+            value = ctypes.c_int(int(color[5:7] + color[3:5] + color[1:3], 16))
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attribute, ctypes.byref(value), ctypes.sizeof(value))
+    except Exception:
+        pass
+
+
+def count_mission_planner_processes():
+    count = 0
+    for path in running_program_paths():
+        path = Path(path)
+        if "planner" in path.name.lower() and is_mission_planner_dir(path.parent):
+            count += 1
+    return count
 
 
 class Tip:
@@ -794,6 +836,106 @@ class ImageButton(tk.Label):
             self.command()
 
 
+class MiniMonitor(tk.Toplevel):
+    """Маленьке вікно поверх усіх: вибрані виходи, MIN · TRIM · MAX, зелене — збігається, червоне — ні."""
+
+    def __init__(self, app):
+        super().__init__(app, bg=LINE)
+        self.app = app
+        self.drag = None
+        self.signature = None
+        self.cells = {}
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        try:
+            self.attributes("-alpha", 0.96)
+        except tk.TclError:
+            pass
+        self.body = tk.Frame(self, bg=SURFACE, padx=12, pady=8)
+        self.body.pack(fill="both", expand=True, padx=1, pady=1)
+        head = tk.Frame(self.body, bg=SURFACE)
+        head.pack(fill="x")
+        self.dot = tk.Label(head, text="●", bg=SURFACE, fg=FAINT, font=(FONT, 8))
+        self.dot.pack(side="left")
+        self.caption = tk.Label(head, text="SERVO TRIM SYNC", bg=SURFACE, fg=FAINT, font=(FONT, 7, "bold"))
+        self.caption.pack(side="left", padx=(5, 0))
+        self.close_button = ImageButton(head, {"normal": app.img["close"], "hover": app.img["close_hover"]},
+                                        app._toggle_overlay, tip="Сховати міні-вікно")
+        self.close_button.pack(side="right")
+        self.table = tk.Frame(self.body, bg=SURFACE)
+        self.table.pack(fill="x", pady=(6, 0))
+        for widget in (self, self.body, head, self.dot, self.caption, self.table):
+            self._bind_drag(widget)
+        position = str(app.config_data.get("overlay_pos") or "")
+        if position.startswith("+"):
+            self.geometry(position)
+        else:
+            self.update_idletasks()
+            self.geometry(f"+{max(0, self.winfo_screenwidth() - 340)}+{90}")
+
+    def _bind_drag(self, widget):
+        widget.bind("<ButtonPress-1>", self._press)
+        widget.bind("<B1-Motion>", self._move)
+        widget.bind("<ButtonRelease-1>", self._release)
+        widget.bind("<Double-Button-1>", lambda _e: self.app._show_main())
+
+    def _press(self, event):
+        self.drag = (event.x_root - self.winfo_x(), event.y_root - self.winfo_y())
+
+    def _move(self, event):
+        if self.drag:
+            self.geometry(f"+{event.x_root - self.drag[0]}+{event.y_root - self.drag[1]}")
+
+    def _release(self, _event):
+        if self.drag:
+            self.drag = None
+            self.app.config_data["overlay_pos"] = f"+{self.winfo_x()}+{self.winfo_y()}"
+            self.app._save_later()
+
+    def _rebuild(self, states):
+        for widget in self.table.winfo_children():
+            widget.destroy()
+        self.cells = {}
+        font_value = self.app.font_value
+        if not states:
+            label = tk.Label(self.table, text="Немає вибраних виходів", bg=SURFACE, fg=MUTED, font=(FONT, 9))
+            label.grid(row=0, column=0, sticky="w")
+            self._bind_drag(label)
+            return
+        for column, text in ((2, "MIN"), (3, "TRIM"), (4, "MAX")):
+            label = tk.Label(self.table, text=text, bg=SURFACE, fg=FAINT, font=(FONT, 7, "bold"), anchor="e")
+            label.grid(row=0, column=column, sticky="e", padx=(14, 0))
+            self._bind_drag(label)
+        for row, state in enumerate(states, start=1):
+            strip = tk.Frame(self.table, bg=FAINT, width=3, height=20)
+            strip.grid(row=row, column=0, sticky="ns", pady=2, padx=(0, 8))
+            name = tk.Label(self.table, text=state["name"], bg=SURFACE, fg=TEXT, font=self.app.font_strong,
+                            anchor="w")
+            name.grid(row=row, column=1, sticky="w", pady=2)
+            values = []
+            for column in (2, 3, 4):
+                value = tk.Label(self.table, text="—", bg=SURFACE, fg=FAINT, font=font_value, anchor="e", width=5)
+                value.grid(row=row, column=column, sticky="e", padx=(14, 0), pady=2)
+                values.append(value)
+            for widget in [strip, name] + values:
+                self._bind_drag(widget)
+            self.cells[state["index"]] = (strip, name, values)
+
+    def show(self, states, link_color):
+        signature = tuple((state["index"], state["name"]) for state in states)
+        if signature != self.signature:
+            self.signature = signature
+            self._rebuild(states)
+        self.dot.configure(fg=link_color)
+        colors = {"ok": OK, "bad": ERR, "unknown": FAINT}
+        for state in states:
+            strip, name, values = self.cells[state["index"]]
+            color = colors[state["status"]]
+            strip.configure(bg=color)
+            for label, value in zip(values, (state["min"], state["trim"], state["max"])):
+                label.configure(text="—" if value is None else f"{value:g}", fg=color)
+
+
 class App(tk.Tk):
     """Панель для шести виходів SERVO: MIN = TRIM − відступ, MAX = TRIM + відступ."""
 
@@ -816,6 +958,9 @@ class App(tk.Tk):
         self.refresh_job = None
         self.rows = []
         self.settings_window = None
+        self.overlay = None
+        self.mp_copies = 0
+        self.next_mp_check = 0.0
         self._load_images()
         self._style()
         self._build()
@@ -825,6 +970,9 @@ class App(tk.Tk):
             self.geometry(geometry)
         self._send_rules()
         self._refresh_values()
+        self.after(10, lambda: dark_title_bar(self))
+        if self.config_data.get("overlay"):
+            self.after(300, self._toggle_overlay)
         self.after(50, self._poll_events)
         if self.config_data.get("autoconnect"):
             self.after(400, self._toggle_connection)
@@ -877,15 +1025,23 @@ class App(tk.Tk):
         head.pack(fill="x")
         tk.Label(head, image=self.img["logo"], bg=BG).pack(side="left")
         titles = tk.Frame(head, bg=BG)
-        titles.pack(side="left", padx=(10, 0))
-        self._label(titles, APP_NAME, TEXT, self.font_title).pack(anchor="w")
-        self._label(titles, "MIN / MAX від TRIM · ArduPilot", MUTED, (FONT, 9)).pack(anchor="w")
+        titles.pack(side="left", padx=(12, 0))
+        title_line = tk.Frame(titles, bg=BG)
+        title_line.pack(anchor="w")
+        self._label(title_line, APP_NAME, TEXT, self.font_title).pack(side="left")
+        tk.Label(title_line, text=f"v{APP_VERSION}", bg=RAISED, fg=MUTED, font=(FONT, 7, "bold"), padx=5).pack(
+            side="left", padx=(8, 0), pady=(3, 0))
+        self._label(titles, "ArduPilot · MIN / MAX від TRIM", MUTED, (FONT, 9)).pack(anchor="w")
         self.settings_button = ImageButton(head, {"normal": self.img["tune"], "hover": self.img["tune_hover"]},
                                            self._open_settings, tip="Налаштування: підключення, номери SERVO,\n"
                                                                      "назви, межі PWM, безпека")
         self.settings_button.pack(side="right", padx=(6, 0))
-        self.pin_button = ImageButton(head, {}, self._toggle_topmost, tip="Тримати вікно поверх Mission Planner")
-        self.pin_button.pack(side="right", padx=(6, 0))
+        self.overlay_button = ImageButton(head, {}, self._toggle_overlay,
+                                          tip="Міні-вікно поверх усіх: вибрані виходи\n"
+                                              "зеленим — збігається, червоним — ні")
+        self.overlay_button.pack(side="right", padx=(8, 0))
+        self.pin_button = ImageButton(head, {}, self._toggle_topmost, tip="Тримати це вікно поверх Mission Planner")
+        self.pin_button.pack(side="right", padx=(8, 0))
         self.connect_button = FlatButton(head, "", self._toggle_connection, font=self.font_strong, padx=12, pady=5,
                                          bg=SURFACE, hover_bg=RAISED,
                                          tip="Програма бачить усе, що бачить Mission Planner —\n"
@@ -937,9 +1093,10 @@ class App(tk.Tk):
         self.apply_button = ImageButton(
             bottom,
             {key: self.img[f"primary_{key}"] for key in ("normal", "hover", "down", "disabled")},
-            self._apply_selected, text="Застосувати до вибраних", font=self.font_strong,
+            self._apply_selected, text="Застосувати до вибраних", font=self.font_strong, fg=BG,
             tip="Виставити MIN і MAX усім виходам з галочкою\nза поточним TRIM і вашими відступами",
         )
+        self.apply_button.colors = (BG, FAINT)
         self.apply_button.pack(side="right")
         status = tk.Frame(bottom, bg=BG)
         status.pack(side="left", fill="x", expand=True)
@@ -1070,6 +1227,60 @@ class App(tk.Tk):
         self._update_controls()
         self._save_later()
 
+    def _toggle_overlay(self):
+        if self.overlay is not None:
+            try:
+                self.config_data["overlay_pos"] = f"+{self.overlay.winfo_x()}+{self.overlay.winfo_y()}"
+                self.overlay.destroy()
+            except tk.TclError:
+                pass
+            self.overlay = None
+            self.config_data["overlay"] = False
+        else:
+            self.overlay = MiniMonitor(self)
+            self.config_data["overlay"] = True
+            self._refresh_values()
+        self._update_controls()
+        self._save_later()
+
+    def _show_main(self):
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+
+    def _output_status(self, index):
+        """(MIN, TRIM, MAX, стан) для міні-вікна: ok — MIN/MAX за правилом, bad — ні, unknown — немає даних."""
+        output = self._output(index)
+        channel = output["channel"]
+        trim = self._current_trim(index)
+        current_min = self.params.get(f"SERVO{channel}_MIN")
+        current_max = self.params.get(f"SERVO{channel}_MAX")
+        if not self.link_ok or trim is None or current_min is None or current_max is None:
+            return current_min, trim, current_max, "unknown"
+        if self.rows[index]["pending_trim"] is not None:
+            return current_min, trim, current_max, "bad"
+        low, high = self.config_data["low"], self.config_data["high"]
+        expected_min = max(low, min(high, round(trim - output["below"])))
+        expected_max = max(low, min(high, round(trim + output["above"])))
+        ok = abs(current_min - expected_min) < 0.5 and abs(current_max - expected_max) < 0.5
+        return current_min, trim, current_max, "ok" if ok else "bad"
+
+    def _update_overlay(self):
+        if self.overlay is None:
+            return
+        states = []
+        for index, output in enumerate(self.config_data["outputs"]):
+            if not output["enabled"]:
+                continue
+            current_min, trim, current_max, status = self._output_status(index)
+            states.append({"index": index, "name": output.get("name") or f"SERVO {output['channel']}",
+                           "min": current_min, "trim": trim, "max": current_max, "status": status})
+        link_color = OK if self.link_ok else (WARN if self.connected_request else FAINT)
+        try:
+            self.overlay.show(states, link_color)
+        except tk.TclError:
+            self.overlay = None
+
     def _toggle_log(self):
         self.config_data["show_log"] = not self.config_data["show_log"]
         self._update_controls()
@@ -1093,6 +1304,9 @@ class App(tk.Tk):
         self._save_later()
 
     def _update_controls(self):
+        overlay = self.overlay is not None
+        self.overlay_button.set_images({"normal": self.img["pip_on" if overlay else "pip_off"],
+                                        "hover": self.img["pip_on" if overlay else "pip_hover"]})
         pin = self.config_data["topmost"]
         self.pin_button.set_images({"normal": self.img["pin_on" if pin else "pin_off"],
                                     "hover": self.img["pin_on" if pin else "pin_hover"]})
@@ -1317,16 +1531,19 @@ class App(tk.Tk):
                 self._set_state(row, "✓ збігається", OK)
             else:
                 mismatched += 1
-                row["result"].configure(fg=WARN)
-                self._set_state(row, f"треба {expected_min} – {expected_max}", WARN)
+                row["result"].configure(fg=ERR)
+                self._set_state(row, f"треба {expected_min} – {expected_max}", ERR)
+        self._update_overlay()
         if not self.link_ok:
             waiting = self.connected_request
             summary, color = (self.link_text, WARN) if waiting else ("Не підключено", FAINT)
+            if waiting and self.mp_copies >= 2:
+                summary = f"Відкрито {self.mp_copies} копії Mission Planner — закрийте зайву"
             title = "чекаю на політник" if waiting else "не підключено"
         elif not selected:
             summary, color, title = "Жоден вихід не вибрано", MUTED, "нічого не вибрано"
         elif mismatched:
-            summary, color = f"Не збігається: {mismatched}", WARN
+            summary, color = f"Не збігається: {mismatched}", ERR
             title = f"⚠ не збігається {mismatched}"
         else:
             summary, color, title = f"✓ Усе збігається · {selected} вих.", OK, "✓ усе збігається"
@@ -1460,20 +1677,24 @@ class App(tk.Tk):
         plugin_status = self._label(plugin_row, "", MUTED, (FONT, 9), justify="left", anchor="w", wraplength=300)
         plugin_status.pack(side="left", fill="x", expand=True)
 
+        plugin_button = FlatButton(plugin_row, "", lambda: None, padx=12, pady=5, bg=SURFACE, fg=ACCENT,
+                                   font=self.font_strong)
+        plugin_button.pack(side="right")
+
         def refresh_plugin_status():
             folders = find_mission_planner_dirs()
             installed = [folder for folder in folders if (folder / "plugins" / PLUGIN_FILE).is_file()]
             if installed:
-                plugin_status.configure(text="✓ Плагін встановлено: сторінки Mission Planner\n"
-                                             "оновлюються самі (після перезапуску MP)", fg=OK)
+                plugin_status.configure(text="✓ Плагін встановлено (необов'язковий):\n"
+                                             "сторінки Mission Planner оновлюються самі", fg=OK)
+                plugin_button.configure(text="Видалити")
+                plugin_button.command = lambda: self._remove_plugin(window, installed, refresh_plugin_status)
             else:
-                plugin_status.configure(text="Плагін, щоб Servo Output і Full Parameter List\n"
-                                             "у Mission Planner оновлювалися самі", fg=MUTED)
+                plugin_status.configure(text="Необов'язково: плагін, щоб Servo Output і\n"
+                                             "Full Parameter List у MP оновлювалися самі", fg=MUTED)
+                plugin_button.configure(text="Встановити")
+                plugin_button.command = lambda: self._install_plugin(window, refresh_plugin_status)
 
-        FlatButton(plugin_row, "Встановити", lambda: self._install_plugin(window, refresh_plugin_status),
-                   padx=12, pady=5, bg=SURFACE, fg=ACCENT, font=self.font_strong,
-                   tip="Копіює маленький плагін у папку plugins Mission Planner.\n"
-                       "Потім перезапустіть Mission Planner.").pack(side="right")
         refresh_plugin_status()
 
         buttons = tk.Frame(body, bg=BG)
@@ -1485,6 +1706,7 @@ class App(tk.Tk):
         window.bind("<Return>", lambda _e: save())
         self.update_idletasks()
         window.geometry(f"+{self.winfo_rootx() + 40}+{self.winfo_rooty() + 60}")
+        window.after(10, lambda: dark_title_bar(window))
 
     def _install_plugin(self, parent, done):
         """Покласти плагін у папку plugins Mission Planner (з правами адміністратора, якщо треба)."""
@@ -1526,6 +1748,33 @@ class App(tk.Tk):
                                      "Скопіюйте вручну файл з папки програми.", parent=parent)
                 return
         self._wait_plugin([folder / "plugins" / PLUGIN_FILE for folder in folders], parent, done, 30)
+
+    def _remove_plugin(self, parent, folders, done):
+        failed = []
+        for folder in folders:
+            target = folder / "plugins" / PLUGIN_FILE
+            try:
+                target.unlink()
+                self._log(f"Плагін видалено: {target}", "ok")
+            except FileNotFoundError:
+                pass
+            except OSError:
+                failed.append(target)
+        for target in failed:
+            try:
+                import ctypes
+                ctypes.windll.shell32.ShellExecuteW(None, "runas", "cmd.exe", f'/c del /F /Q "{target}"', None, 0)
+            except Exception:
+                pass
+        self._wait_removed([folder / "plugins" / PLUGIN_FILE for folder in folders], parent, done, 30)
+
+    def _wait_removed(self, targets, parent, done, attempts):
+        if not any(target.is_file() for target in targets) or attempts <= 0:
+            done()
+            if not any(target.is_file() for target in targets):
+                messagebox.showinfo(APP_NAME, "Плагін видалено. Перезапустіть Mission Planner.", parent=parent)
+            return
+        self.after(500, lambda: self._wait_removed(targets, parent, done, attempts - 1))
 
     def _wait_plugin(self, targets, parent, done, attempts):
         if all(target.is_file() for target in targets):
@@ -1584,6 +1833,16 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         now = time.monotonic()
+        if os.name == "nt" and self.connected_request and not self.link_ok and now >= self.next_mp_check:
+            # Дві копії MP (стара «зависла» після перезапуску) — частa причина, чому даних немає.
+            self.next_mp_check = now + 5.0
+            try:
+                copies = count_mission_planner_processes()
+            except Exception:
+                copies = 0
+            if copies != self.mp_copies:
+                self.mp_copies = copies
+                refresh = True
         for row in self.rows:
             if row["pending_trim"] is not None and not row["trim_job"] and now - row["pending_time"] > 6:
                 row["pending_trim"] = None
@@ -1603,6 +1862,11 @@ class App(tk.Tk):
         self.log_text.configure(state="disabled")
 
     def _close(self):
+        if self.overlay is not None:
+            try:
+                self.config_data["overlay_pos"] = f"+{self.overlay.winfo_x()}+{self.overlay.winfo_y()}"
+            except tk.TclError:
+                pass
         save_config(self._collect_config())
         self.worker.commands.put(("quit",))
         self.destroy()
