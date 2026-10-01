@@ -6,13 +6,17 @@
 «Авто» — змінили TRIM у Mission Planner, і MIN/MAX виставляються самі, нічого не натискаючи.
 Без «Авто» — кнопка «Застосувати до вибраних» робить те саме для всіх виходів з галочкою.
 
-Підключення: Mission Planner → Ctrl+F → «Mavlink» (MAVLink Mirror) → UDP Client,
-127.0.0.1, порт 14551, галочка «Write access» → Connect. У програмі — «udpin:0.0.0.0:14551».
+Підключення — «Автоматично»: програма бере MAVLink із вбудованого сервера Mission Planner
+(порт 56781), тож працює незалежно від того, як MP підключений до політника (USB/COM,
+радіомодем, UDP, TCP). Нічого в Mission Planner вмикати не треба. Запасний шлях —
+MAVLink Mirror на UDP 14551, якщо його ввімкнено.
 """
 
+import base64
 import json
 import os
 import queue
+import socket
 import tempfile
 import threading
 import time
@@ -25,11 +29,21 @@ from pymavlink import mavutil
 APP_NAME = "Servo Trim Sync"
 CONFIG_DIR = Path(os.environ.get("APPDATA", tempfile.gettempdir())) / "ServoTrimSync"
 CONFIG_PATH = CONFIG_DIR / "config.json"
-CONNECTION_PRESETS = (
-    "udpin:0.0.0.0:14551",
-    "udpin:0.0.0.0:14550",
-    "tcp:127.0.0.1:5760",
-)
+AUTO_SOURCE = "auto"
+MP_SOURCE = "missionplanner"
+MIRROR_SOURCE = "udpin:0.0.0.0:14551"
+MP_WEB_PORT = 56781
+# Порт 14550 навмисно не слухаємо: якщо Mission Planner підключений по UDP 14550,
+# спільний сокет міг би «перехоплювати» його пакети.
+AUTO_SOURCES = (MP_SOURCE, MIRROR_SOURCE)
+SOURCE_TITLES = {
+    AUTO_SOURCE: "Автоматично (рекомендовано)",
+    MP_SOURCE: "Через Mission Planner (будь-яке підключення)",
+    MIRROR_SOURCE: "MAVLink Mirror · UDP 14551",
+}
+CONNECTION_PRESETS = (AUTO_SOURCE, MP_SOURCE, MIRROR_SOURCE, "tcp:127.0.0.1:5760")
+RETRY_OPEN_S = 2.0
+CONFIG_VERSION = 2
 BAUD_RATES = ("57600", "115200", "921600")
 HEARTBEAT_TIMEOUT = 5.0
 WRITE_RETRY_S = 1.5
@@ -48,7 +62,8 @@ def channel_rules(channel, below, above, low=800, high=2200):
 
 
 DEFAULT_CONFIG = {
-    "connection": CONNECTION_PRESETS[0],
+    "config_version": CONFIG_VERSION,
+    "connection": AUTO_SOURCE,
     "baud": "57600",
     "only_disarmed": True,
     "low": 800,
@@ -89,6 +104,11 @@ def load_config():
         for output in outputs:
             output.setdefault("name", "")
         config["outputs"] = outputs
+        if int(data.get("config_version", 1)) < CONFIG_VERSION:
+            # Старі версії підключалися лише через MAVLink Mirror — тепер «Автоматично».
+            if config["connection"] in ("udpin:0.0.0.0:14551", "udpin:0.0.0.0:14550", ""):
+                config["connection"] = AUTO_SOURCE
+            config["config_version"] = CONFIG_VERSION
         return config
     except Exception:
         return json.loads(json.dumps(DEFAULT_CONFIG))
@@ -102,14 +122,134 @@ def save_config(config):
         pass
 
 
+class MissionPlannerLink(mavutil.mavfile):
+    """MAVLink через вбудований сервер Mission Planner: ws://127.0.0.1:56781/websocket/raw.
+
+    Mission Planner сам віддає сюди кожен пакет від політника і пересилає наші пакети політнику —
+    незалежно від того, як він підключений (USB/COM, радіомодем, UDP, TCP). Нічого вмикати не треба.
+    """
+
+    def __init__(self, host="127.0.0.1", port=MP_WEB_PORT, source_system=254, source_component=191):
+        sock = socket.create_connection((host, port), timeout=1.5)
+        try:
+            key = base64.b64encode(os.urandom(16)).decode()
+            sock.sendall((
+                f"GET /websocket/raw HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\n"
+                f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            ).encode())
+            response = b""
+            while b"\r\n\r\n" not in response and b"\n\n" not in response:
+                chunk = sock.recv(4096)
+                if not chunk or len(response) > 16384:
+                    raise ConnectionError("Mission Planner не відповів на запит")
+                response += chunk
+            separator = b"\r\n\r\n" if b"\r\n\r\n" in response else b"\n\n"
+            head, _, rest = response.partition(separator)
+            if b" 101" not in head.split(b"\n", 1)[0]:
+                raise ConnectionError("ця версія Mission Planner не віддає MAVLink (оновіть MP)")
+        except Exception:
+            sock.close()
+            raise
+        sock.setblocking(False)
+        self.sock = sock
+        self.frames = bytearray(rest)
+        mavutil.mavfile.__init__(self, sock.fileno(), "missionplanner", source_system=source_system,
+                                 source_component=source_component)
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+    def recv(self, n=None):
+        try:
+            data = self.sock.recv(65536)
+            if not data:
+                raise ConnectionError("Mission Planner закрито")
+            self.frames.extend(data)
+        except (BlockingIOError, InterruptedError):
+            pass
+        out = bytearray()
+        buffer = self.frames
+        while len(buffer) >= 2:
+            opcode, length, position = buffer[0] & 0x0F, buffer[1] & 0x7F, 2
+            masked = buffer[1] & 0x80
+            if length == 126:
+                if len(buffer) < 4:
+                    break
+                length, position = int.from_bytes(buffer[2:4], "big"), 4
+            elif length == 127:
+                if len(buffer) < 10:
+                    break
+                length, position = int.from_bytes(buffer[2:10], "big"), 10
+            mask = None
+            if masked:
+                mask = buffer[position:position + 4]
+                position += 4
+            if len(buffer) < position + length:
+                break
+            payload = bytearray(buffer[position:position + length])
+            del buffer[:position + length]
+            if mask:
+                for index in range(len(payload)):
+                    payload[index] ^= mask[index % 4]
+            if opcode == 0x8:
+                raise ConnectionError("Mission Planner закрив з'єднання")
+            if opcode in (0x0, 0x1, 0x2):
+                out.extend(payload)
+        return bytes(out)
+
+    def write(self, buf):
+        # Кадр WebSocket від клієнта: FIN + binary, маска обов'язкова.
+        payload = bytes(buf)
+        length = len(payload)
+        header = bytearray([0x82])
+        if length < 126:
+            header.append(0x80 | length)
+        else:
+            header.append(0x80 | 126)
+            header += length.to_bytes(2, "big")
+        mask = os.urandom(4)
+        header += mask
+        frame = bytes(header) + bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+        self.sock.setblocking(True)
+        try:
+            self.sock.sendall(frame)
+        finally:
+            self.sock.setblocking(False)
+
+
+def open_source(source, baud):
+    if source == MP_SOURCE:
+        return MissionPlannerLink()
+    return mavutil.mavlink_connection(source, baud=int(baud), source_system=254, source_component=191,
+                                      autoreconnect=True, retries=0)
+
+
+def source_title(source):
+    return SOURCE_TITLES.get(source, source)
+
+
 class MavWorker(threading.Thread):
-    """Весь обмін MAVLink в окремому потоці; з вікном спілкується через черги."""
+    """Весь обмін MAVLink в окремому потоці; з вікном спілкується через черги.
+
+    «Автоматично» одночасно шукає політник через Mission Planner (вбудований сервер)
+    і через MAVLink Mirror; працює з тим, звідки першим прийде heartbeat політника.
+    """
 
     def __init__(self, events):
         super().__init__(daemon=True)
         self.events = events
         self.commands = queue.Queue()
+        self.wanted = None            # (джерело, швидкість) або None, якщо відключено
+        self.links = {}               # відкриті кандидати, поки шукаємо
+        self.next_try = {}
+        self.failures = {}
         self.master = None
+        self.master_source = None
+        self.search_started = 0.0
+        self.status = None
         self.target = (1, 1)
         self.params = {}
         self.rules = []
@@ -128,6 +268,11 @@ class MavWorker(threading.Thread):
     def log(self, text, level="info"):
         self.emit("log", text, level)
 
+    def set_status(self, ok, text):
+        if self.status != (ok, text):
+            self.status = (ok, text)
+            self.emit("link", ok, text)
+
     def run(self):
         while True:
             try:
@@ -139,12 +284,11 @@ class MavWorker(threading.Thread):
                     self._close()
                     return
                 self._handle_command(command)
-            if self.master is not None:
+            if self.wanted is not None:
                 try:
                     self._pump()
-                except Exception as exc:  # обрив порту тощо
-                    self.log(f"Помилка зв'язку: {exc}", "error")
-                    self._close()
+                except Exception as exc:  # обрив зв'язку тощо — шукаємо далі
+                    self._drop_master(f"Зв'язок перервано: {exc}")
 
     def _handle_command(self, command):
         kind = command[0]
@@ -161,39 +305,136 @@ class MavWorker(threading.Thread):
         elif kind == "write_trim":
             self._write_trim(command[1], command[2], command[3])
 
-    def _connect(self, connection, baud):
+    # ---- пошук і підключення -----------------------------------------------------------
+    def _sources(self):
+        source = self.wanted[0]
+        return AUTO_SOURCES if source == AUTO_SOURCE else (source,)
+
+    def _connect(self, source, baud):
         self._close()
-        try:
-            self.master = mavutil.mavlink_connection(
-                connection, baud=int(baud), source_system=254, source_component=191,
-                autoreconnect=True,
-            )
-        except Exception as exc:
-            self.master = None
-            self.log(f"Не вдалося відкрити «{connection}»: {exc}", "error")
-            self.emit("link", False, "Не підключено")
-            return
-        self.params.clear()
-        self.pending.clear()
-        self.last_vehicle_heartbeat = 0.0
-        self.link_ok = False
-        self.log(f"Слухаю {connection} — чекаю на політник…")
-        self.emit("link", False, "Чекаю на політник…")
+        self.wanted = (source or AUTO_SOURCE, baud)
+        self.search_started = time.monotonic()
+        self.failures.clear()
+        self.next_try.clear()
+        if self.wanted[0] == AUTO_SOURCE:
+            self.log("Шукаю політник через Mission Planner…")
+        else:
+            self.log(f"Підключаюся: {source_title(self.wanted[0])}…")
+
+    def _close_links(self, keep=None):
+        for source, link in list(self.links.items()):
+            if link is keep:
+                continue
+            try:
+                link.close()
+            except Exception:
+                pass
+            del self.links[source]
 
     def _close(self):
+        self._close_links()
         if self.master is not None:
             try:
                 self.master.close()
             except Exception:
                 pass
         self.master = None
+        self.master_source = None
+        self.wanted = None
         self.link_ok = False
         self.pending.clear()
-        self.emit("link", False, "Не підключено")
+        self.set_status(False, "Не підключено")
+
+    def _drop_master(self, reason):
+        """Втратили зв'язок: закрити джерело й знову шукати (через секунду)."""
+        if self.master is not None:
+            try:
+                self.master.close()
+            except Exception:
+                pass
+            self.next_try[self.master_source] = time.monotonic() + 1.0
+            self.links.pop(self.master_source, None)
+        self.master = None
+        self.master_source = None
+        if self.link_ok:
+            self.log(reason, "error")
+        self.link_ok = False
+        self.pending.clear()
+        self.search_started = time.monotonic()
+
+    def _scan(self, now):
+        baud = self.wanted[1]
+        for source in self._sources():
+            link = self.links.get(source)
+            if link is None:
+                if now < self.next_try.get(source, 0.0):
+                    continue
+                try:
+                    link = open_source(source, baud)
+                except Exception as exc:
+                    self.next_try[source] = now + RETRY_OPEN_S
+                    self.failures[source] = exc
+                    continue
+                self.links[source] = link
+                self.failures.pop(source, None)
+            try:
+                for _ in range(200):
+                    message = link.recv_match(blocking=False)
+                    if message is None:
+                        break
+                    if self._vehicle_heartbeat(message):
+                        self._lock(source, link)
+                        self._on_message(message)
+                        return
+            except Exception as exc:
+                self.failures[source] = exc
+                self.next_try[source] = now + RETRY_OPEN_S
+                try:
+                    link.close()
+                except Exception:
+                    pass
+                self.links.pop(source, None)
+        self.set_status(False, self._search_text(now))
+
+    def _search_text(self, now):
+        auto = self.wanted[0] == AUTO_SOURCE
+        if MP_SOURCE in self.links:
+            return "Mission Planner відкрито — чекаю політник"
+        if not auto:
+            failure = self.failures.get(self.wanted[0])
+            if failure is not None:
+                return f"Не вдалося відкрити: {failure}"
+            return "Чекаю на політник…"
+        failure = self.failures.get(MP_SOURCE)
+        if isinstance(failure, ConnectionRefusedError) or (
+                isinstance(failure, OSError) and getattr(failure, "errno", None) in (10061, 111)):
+            return "Чекаю на Mission Planner…"
+        if failure is not None:
+            return f"Mission Planner: {failure}"
+        return "Шукаю Mission Planner…"
+
+    @staticmethod
+    def _vehicle_heartbeat(message):
+        return (message.get_type() == "HEARTBEAT"
+                and message.type != mavutil.mavlink.MAV_TYPE_GCS
+                and message.autopilot != mavutil.mavlink.MAV_AUTOPILOT_INVALID)
+
+    def _lock(self, source, link):
+        self._close_links(keep=link)
+        self.links.clear()
+        self.master = link
+        self.master_source = source
+        self.params.clear()
+        self.pending.clear()
+        self.link_ok = False
+        self.last_own_heartbeat = 0.0
 
     # ---- основний цикл -----------------------------------------------------------------
     def _pump(self):
         now = time.monotonic()
+        if self.master is None:
+            self._scan(now)
+            return
         if now - self.last_own_heartbeat >= 1.0:
             self.last_own_heartbeat = now
             self.master.mav.heartbeat_send(
@@ -205,9 +446,8 @@ class MavWorker(threading.Thread):
                 break
             self._on_message(message)
         if self.link_ok and now - self.last_vehicle_heartbeat > HEARTBEAT_TIMEOUT:
-            self.link_ok = False
-            self.emit("link", False, "Немає зв'язку з політником")
-            self.log("Зв'язок з політником втрачено", "error")
+            self._drop_master("Зв'язок з політником втрачено — шукаю знову…")
+            return
         if self.link_ok and now - self.last_refresh > REFRESH_SOURCES_S:
             self._request_sources()
         self._retry_writes(now)
@@ -215,21 +455,26 @@ class MavWorker(threading.Thread):
     def _on_message(self, message):
         kind = message.get_type()
         if kind == "HEARTBEAT":
-            if (message.type == mavutil.mavlink.MAV_TYPE_GCS
-                    or message.autopilot == mavutil.mavlink.MAV_AUTOPILOT_INVALID):
+            if not self._vehicle_heartbeat(message):
                 return
-            self.target = (message.get_srcSystem(), message.get_srcComponent())
+            source = (message.get_srcSystem(), message.get_srcComponent())
+            if self.link_ok and source != self.target:
+                return  # інший апарат у тій самій мережі — працюємо з першим
+            self.target = source
             self.last_vehicle_heartbeat = time.monotonic()
             armed = bool(message.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
             if not self.link_ok:
                 self.link_ok = True
-                self.emit("link", True, f"Політник #{self.target[0]} на зв'язку")
-                self.log(f"Підключено до політника #{self.target[0]}", "ok")
+                route = source_title(self.master_source) if self.master_source != MP_SOURCE else "через Mission Planner"
+                self.set_status(True, f"Політник #{self.target[0]} · {route}")
+                self.log(f"Підключено до політника #{self.target[0]} ({route})", "ok")
                 self._request_sources()
             if armed != self.armed:
                 self.armed = armed
                 self.emit("armed", armed)
         elif kind == "PARAM_VALUE":
+            if (message.get_srcSystem(), message.get_srcComponent()) != self.target:
+                return
             name = message.param_id
             if isinstance(name, bytes):
                 name = name.decode(errors="ignore")
@@ -578,8 +823,9 @@ class App(tk.Tk):
         self.pin_button.pack(side="right", padx=(6, 0))
         self.connect_button = FlatButton(head, "", self._toggle_connection, font=self.font_strong, padx=12, pady=5,
                                          bg=SURFACE, hover_bg=RAISED,
-                                         tip="Mission Planner: Ctrl+F → «Mavlink» → UDP Client,\n"
-                                             "127.0.0.1, порт 14551, «Write access» → Connect")
+                                         tip="Програма бачить усе, що бачить Mission Planner —\n"
+                                             "хоч як він підключений (USB, COM, радіо, UDP, TCP).\n"
+                                             "У Mission Planner нічого вмикати не треба.")
         self.connect_button.pack(side="right", padx=(0, 6))
         self.armed_label = self._label(head, "", ERR, (FONT, 9, "bold"))
         self.armed_label.pack(side="right", padx=(0, 10))
@@ -632,7 +878,7 @@ class App(tk.Tk):
         self.apply_button.pack(side="right")
         status = tk.Frame(bottom, bg=BG)
         status.pack(side="left", fill="x", expand=True)
-        self.summary = self._label(status, "", MUTED, self.font_strong, anchor="w")
+        self.summary = self._label(status, "", MUTED, self.font_strong, anchor="w", justify="left", wraplength=320)
         self.summary.pack(anchor="w")
         line = tk.Frame(status, bg=BG)
         line.pack(anchor="w", fill="x")
@@ -801,16 +1047,14 @@ class App(tk.Tk):
             self.connect_button.set_style(fg=OK, hover_fg=TEXT)
             self.connect_button.tip.text = f"{self.link_text}\nКлік — відключитися"
         elif self.connected_request:
-            self.connect_button.configure(text="●  Чекаю на політник")
+            self.connect_button.configure(text="●  Шукаю…")
             self.connect_button.set_style(fg=WARN, hover_fg=TEXT)
-            self.connect_button.tip.text = ("Mission Planner: Ctrl+F → «Mavlink» → UDP Client,\n"
-                                            "127.0.0.1, порт 14551, «Write access» → Connect\n"
-                                            "Клік — відключитися")
+            self.connect_button.tip.text = f"{self.link_text}\nКлік — зупинити пошук"
         else:
             self.connect_button.configure(text="Підключитися")
             self.connect_button.set_style(fg=ACCENT, hover_fg=TEXT)
-            self.connect_button.tip.text = ("Mission Planner: Ctrl+F → «Mavlink» → UDP Client,\n"
-                                            "127.0.0.1, порт 14551, «Write access» → Connect")
+            self.connect_button.tip.text = ("Програма бачить усе, що бачить Mission Planner —\n"
+                                            "хоч як він підключений. Нічого вмикати не треба.")
 
     # ---- зміни з панелі ----------------------------------------------------------------------
     def _output(self, index):
@@ -1012,7 +1256,7 @@ class App(tk.Tk):
                 self._set_state(row, f"треба {expected_min} – {expected_max}", WARN)
         if not self.link_ok:
             waiting = self.connected_request
-            summary, color = ("Чекаю на політник…", WARN) if waiting else ("Не підключено", FAINT)
+            summary, color = (self.link_text, WARN) if waiting else ("Не підключено", FAINT)
             title = "чекаю на політник" if waiting else "не підключено"
         elif not selected:
             summary, color, title = "Жоден вихід не вибрано", MUTED, "нічого не вибрано"
@@ -1029,7 +1273,7 @@ class App(tk.Tk):
 
     # ---- налаштування ------------------------------------------------------------------------
     def _connection_choices(self):
-        choices = list(CONNECTION_PRESETS)
+        choices = [source_title(source) for source in CONNECTION_PRESETS]
         try:
             from serial.tools import list_ports
             choices += [port.device for port in list_ports.comports()]
@@ -1071,16 +1315,16 @@ class App(tk.Tk):
             return variable
 
         section(0, "ПІДКЛЮЧЕННЯ")
-        connection = tk.StringVar(value=self.config_data["connection"])
+        connection = tk.StringVar(value=source_title(self.config_data["connection"]))
         baud = tk.StringVar(value=self.config_data["baud"])
         self._label(body, "Адреса", MUTED).grid(row=1, column=0, columnspan=2, sticky="w", pady=3)
-        ttk.Combobox(body, textvariable=connection, values=self._connection_choices(), width=24).grid(
+        ttk.Combobox(body, textvariable=connection, values=self._connection_choices(), width=40).grid(
             row=1, column=2, columnspan=2, sticky="ew", pady=3)
         self._label(body, "Швидкість (COM)", MUTED).grid(row=2, column=0, columnspan=2, sticky="w", pady=3)
         ttk.Combobox(body, textvariable=baud, values=BAUD_RATES, width=10).grid(row=2, column=2, sticky="w", pady=3)
         autoconnect = check(3, "Підключатися одразу при запуску", self.config_data.get("autoconnect", True))
-        self._label(body, ("Mission Planner: Ctrl+F → «Mavlink» → UDP Client, 127.0.0.1,\n"
-                           "порт 14551, «Write access» → Connect. Тут: udpin:0.0.0.0:14551"),
+        self._label(body, ("«Автоматично» — бере дані з Mission Planner, хоч як він підключений\n"
+                           "до політника. Без Mission Planner виберіть COM-порт напряму."),
                     FAINT, (FONT, 8), justify="left").grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
         section(5, "ВИХОДИ")
@@ -1131,9 +1375,11 @@ class App(tk.Tk):
                 messagebox.showerror(APP_NAME, "Введіть цілі числа" if text.startswith("invalid") else text,
                                      parent=window)
                 return
-            reconnect = (connection.get().strip() != self.config_data["connection"]
+            chosen = connection.get().strip()
+            chosen = next((key for key, title in SOURCE_TITLES.items() if title == chosen), chosen) or AUTO_SOURCE
+            reconnect = (chosen != self.config_data["connection"]
                          or baud.get().strip() != self.config_data["baud"])
-            self.config_data.update({"connection": connection.get().strip(), "baud": baud.get().strip(),
+            self.config_data.update({"connection": chosen, "baud": baud.get().strip(),
                                      "low": low_value, "high": high_value, "outputs": outputs,
                                      "only_disarmed": only_disarmed.get(), "autoconnect": autoconnect.get()})
             save_config(self._collect_config())
