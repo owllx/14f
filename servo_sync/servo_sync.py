@@ -24,7 +24,13 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-from pymavlink import mavutil
+# Одразу MAVLink 2 (ним говорять ArduPilot і Mission Planner; пакети MAVLink 1 теж читаються).
+# Інакше pymavlink перемикає діалект «на льоту» і в exe шукає XML-файли, яких там немає.
+os.environ["MAVLINK20"] = "1"
+os.environ["MAVLINK_DIALECT"] = "ardupilotmega"
+from pymavlink import mavutil  # noqa: E402
+from pymavlink.dialects.v10 import ardupilotmega as _dialect_v10  # noqa: E402,F401  (щоб потрапили в exe)
+from pymavlink.dialects.v20 import ardupilotmega as _dialect_v20  # noqa: E402,F401
 
 APP_NAME = "Servo Trim Sync"
 CONFIG_DIR = Path(os.environ.get("APPDATA", tempfile.gettempdir())) / "ServoTrimSync"
