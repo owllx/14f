@@ -16,13 +16,15 @@ import base64
 import json
 import os
 import queue
+import shutil
 import socket
+import sys
 import tempfile
 import threading
 import time
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 # Одразу MAVLink 2 (ним говорять ArduPilot і Mission Planner; пакети MAVLink 1 теж читаються).
 # Інакше pymavlink перемикає діалект «на льоту» і в exe шукає XML-файли, яких там немає.
@@ -55,6 +57,63 @@ HEARTBEAT_TIMEOUT = 5.0
 WRITE_RETRY_S = 1.5
 WRITE_ATTEMPTS = 3
 REFRESH_SOURCES_S = 10.0
+
+PLUGIN_FILE = "ServoTrimSyncRefresh.cs"
+
+
+def plugin_source_path():
+    """Файл плагіна для Mission Planner (у exe — поруч із розпакованою програмою)."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return Path(base) / "mp_plugin" / PLUGIN_FILE
+
+
+def running_program_paths():
+    """Шляхи до exe запущених програм (Windows, без сторонніх бібліотек)."""
+    if os.name != "nt":
+        return []
+    import ctypes
+    from ctypes import wintypes
+    psapi, kernel32 = ctypes.WinDLL("psapi"), ctypes.WinDLL("kernel32")
+    pids = (wintypes.DWORD * 4096)()
+    needed = wintypes.DWORD()
+    if not psapi.EnumProcesses(pids, ctypes.sizeof(pids), ctypes.byref(needed)):
+        return []
+    paths = []
+    for pid in pids[:needed.value // ctypes.sizeof(wintypes.DWORD)]:
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            continue
+        try:
+            buffer = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(1024)
+            if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+                paths.append(buffer.value)
+        finally:
+            kernel32.CloseHandle(handle)
+    return paths
+
+
+def is_mission_planner_dir(folder):
+    folder = Path(folder)
+    return (folder / "plugins").is_dir() and (
+        (folder / "MissionPlanner.exe").is_file() or (folder / "MAVLink.dll").is_file())
+
+
+def find_mission_planner_dirs():
+    """Папки Mission Planner: спершу запущений (зокрема збірки з іншою назвою), потім стандартні."""
+    found = []
+    for path in running_program_paths():
+        folder = Path(path).parent
+        if folder not in found and is_mission_planner_dir(folder):
+            found.append(folder)
+    for env in ("ProgramFiles(x86)", "ProgramFiles"):
+        root = os.environ.get(env)
+        if root:
+            folder = Path(root) / "Mission Planner"
+            if folder not in found and is_mission_planner_dir(folder):
+                found.append(folder)
+    return found
+
 
 def channel_rules(channel, below, above, low=800, high=2200):
     """Пара правил «MIN/MAX від TRIM» для одного виходу SERVOn."""
@@ -1395,8 +1454,30 @@ class App(tk.Tk):
                 self.worker.commands.put(("connect", self.config_data["connection"], self.config_data["baud"]))
             window.destroy()
 
+        section(16, "MISSION PLANNER")
+        plugin_row = tk.Frame(body, bg=BG)
+        plugin_row.grid(row=17, column=0, columnspan=4, sticky="ew", pady=3)
+        plugin_status = self._label(plugin_row, "", MUTED, (FONT, 9), justify="left", anchor="w", wraplength=300)
+        plugin_status.pack(side="left", fill="x", expand=True)
+
+        def refresh_plugin_status():
+            folders = find_mission_planner_dirs()
+            installed = [folder for folder in folders if (folder / "plugins" / PLUGIN_FILE).is_file()]
+            if installed:
+                plugin_status.configure(text="✓ Плагін встановлено: сторінки Mission Planner\n"
+                                             "оновлюються самі (після перезапуску MP)", fg=OK)
+            else:
+                plugin_status.configure(text="Плагін, щоб Servo Output і Full Parameter List\n"
+                                             "у Mission Planner оновлювалися самі", fg=MUTED)
+
+        FlatButton(plugin_row, "Встановити", lambda: self._install_plugin(window, refresh_plugin_status),
+                   padx=12, pady=5, bg=SURFACE, fg=ACCENT, font=self.font_strong,
+                   tip="Копіює маленький плагін у папку plugins Mission Planner.\n"
+                       "Потім перезапустіть Mission Planner.").pack(side="right")
+        refresh_plugin_status()
+
         buttons = tk.Frame(body, bg=BG)
-        buttons.grid(row=16, column=0, columnspan=4, sticky="e", pady=(16, 0))
+        buttons.grid(row=18, column=0, columnspan=4, sticky="e", pady=(16, 0))
         FlatButton(buttons, "Скасувати", window.destroy, padx=12, pady=6, bg=SURFACE).pack(side="left", padx=6)
         FlatButton(buttons, "Зберегти", save, padx=14, pady=6, bg=SURFACE, fg=ACCENT,
                    font=self.font_strong).pack(side="left")
@@ -1404,6 +1485,60 @@ class App(tk.Tk):
         window.bind("<Return>", lambda _e: save())
         self.update_idletasks()
         window.geometry(f"+{self.winfo_rootx() + 40}+{self.winfo_rooty() + 60}")
+
+    def _install_plugin(self, parent, done):
+        """Покласти плагін у папку plugins Mission Planner (з правами адміністратора, якщо треба)."""
+        source = plugin_source_path()
+        if not source.is_file():
+            messagebox.showerror(APP_NAME, f"Не знайдено файл плагіна: {source}", parent=parent)
+            return
+        folders = find_mission_planner_dirs()
+        if not folders:
+            chosen = filedialog.askdirectory(
+                parent=parent, title="Виберіть папку Mission Planner (де MissionPlanner.exe)")
+            if not chosen:
+                return
+            if not (Path(chosen) / "plugins").is_dir() and not (Path(chosen) / "MissionPlanner.exe").is_file():
+                messagebox.showerror(APP_NAME, "Це не схоже на папку Mission Planner", parent=parent)
+                return
+            folders = [Path(chosen)]
+        failed = []
+        for folder in folders:
+            target = folder / "plugins" / PLUGIN_FILE
+            try:
+                target.parent.mkdir(exist_ok=True)
+                shutil.copyfile(source, target)
+                self._log(f"Плагін встановлено: {target}", "ok")
+            except OSError:
+                failed.append(target)
+        for target in failed:
+            # Program Files — потрібні права адміністратора: Windows спитає дозвіл.
+            staged = Path(tempfile.gettempdir()) / PLUGIN_FILE
+            shutil.copyfile(source, staged)
+            try:
+                import ctypes
+                arguments = f'/c mkdir "{target.parent}" 2>nul & copy /Y "{staged}" "{target}"'
+                result = ctypes.windll.shell32.ShellExecuteW(None, "runas", "cmd.exe", arguments, None, 0)
+            except Exception:
+                result = 0
+            if result <= 32:
+                messagebox.showerror(APP_NAME, f"Не вдалося скопіювати плагін у\n{target.parent}\n\n"
+                                     "Скопіюйте вручну файл з папки програми.", parent=parent)
+                return
+        self._wait_plugin([folder / "plugins" / PLUGIN_FILE for folder in folders], parent, done, 30)
+
+    def _wait_plugin(self, targets, parent, done, attempts):
+        if all(target.is_file() for target in targets):
+            done()
+            self._log("Плагін для Mission Planner встановлено — перезапустіть Mission Planner", "ok")
+            messagebox.showinfo(APP_NAME, "Плагін встановлено.\n\nПерезапустіть Mission Planner — після цього "
+                                "сторінки Servo Output і Full Parameter List оновлюватимуться самі.", parent=parent)
+            return
+        if attempts <= 0:
+            done()
+            self._log("Плагін не встановлено (немає дозволу?)", "warn")
+            return
+        self.after(500, lambda: self._wait_plugin(targets, parent, done, attempts - 1))
 
     # ---- підключення ---------------------------------------------------------------------
     def _toggle_connection(self):
