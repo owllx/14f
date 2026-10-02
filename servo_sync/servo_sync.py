@@ -38,7 +38,7 @@ from pymavlink.dialects.v10 import ardupilotmega as _dialect_v10  # noqa: E402,F
 from pymavlink.dialects.v20 import ardupilotmega as _dialect_v20  # noqa: E402,F401
 
 APP_NAME = "Servo Trim Sync"
-APP_VERSION = "1.10"
+APP_VERSION = "1.11"
 CONFIG_DIR = Path(os.environ.get("APPDATA", tempfile.gettempdir())) / "ServoTrimSync"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 AUTO_SOURCE = "auto"
@@ -209,6 +209,14 @@ DEFAULT_IGNORE = (
 )
 
 
+# Лічильники (час роботи, кількість вмикань, наліт) змінюються самі — не звіряємо й не пишемо в журнал.
+ALWAYS_SKIP = ("STAT_*",)
+
+
+def always_skipped(name):
+    return any(fnmatch.fnmatchcase(name, pattern) for pattern in ALWAYS_SKIP)
+
+
 def param_group(name):
     if name.startswith("SERVO"):
         return "servo"
@@ -345,7 +353,7 @@ def compare_params(reference, current, ignore, groups, complete=True):
     diffs = []
     for name in sorted(reference):
         group = param_group(name)
-        if not groups.get(group, True) or is_ignored(name, ignore):
+        if not groups.get(group, True) or is_ignored(name, ignore) or always_skipped(name):
             continue
         actual = current.get(name)
         if actual is None:
@@ -357,43 +365,8 @@ def compare_params(reference, current, ignore, groups, complete=True):
 
 
 def checked_count(reference, ignore, groups):
-    return sum(1 for name in reference if groups.get(param_group(name), True) and not is_ignored(name, ignore))
-
-
-# ---- GPS (лише читання потоку, який і так іде до Mission Planner) ------------------------------
-GPS_FIX_NAMES = {0: "NO GPS", 1: "NO FIX", 2: "2D FIX", 3: "3D FIX", 4: "DGPS", 5: "RTK FLOAT", 6: "RTK FIXED",
-                 7: "STATIC", 8: "PPP"}
-GPS_STALE_S = 5.0
-GPS_TEXT_S = 15.0
-GPS_GREEN_NOCAL = "nocal"   # зелене, коли GPS «not calibrated» (без фіксу / не готовий)
-GPS_GREEN_FIX = "fix"       # зелене, коли GPS має фікс
-
-
-def gps_status(gps, link_ok, now, green_when=GPS_GREEN_NOCAL):
-    """(колір-стан ok/bad/unknown, коротка мітка, подробиці) для GPS-віконця."""
-    fresh = now - gps.get("raw_time", 0.0) <= GPS_STALE_S
-    text_fresh = gps.get("text") and now - gps.get("text_time", 0.0) <= GPS_TEXT_S
-    if not link_ok or (not fresh and not text_fresh):
-        return "unknown", "—", "Немає даних GPS (програма не підключена до політника)"
-    fix = gps.get("fix") if fresh else None
-    calib_text = bool(text_fresh and "CALIB" in gps["text"].upper())
-    nocal = calib_text or fix is None or fix < 2 or gps.get("health") is False
-    if calib_text:
-        label = "NOT CALIBRATED"
-    elif fix is None:
-        label = "NO DATA"
-    elif fix < 2:
-        label = GPS_FIX_NAMES.get(fix, f"FIX {fix}")
-    else:
-        label = f"{GPS_FIX_NAMES.get(fix, f'FIX {fix}')} · {gps.get('sats', 0)}"
-    details = [f"Стан: {GPS_FIX_NAMES.get(fix, '—') if fix is not None else '—'}",
-               f"Супутників: {gps.get('sats', 0) if fresh else '—'}"]
-    if gps.get("health") is not None:
-        details.append("Датчик GPS: " + ("справний" if gps["health"] else "НЕ справний"))
-    if text_fresh:
-        details.append(f"Повідомлення: {gps['text']}")
-    green = nocal if green_when == GPS_GREEN_NOCAL else not nocal
-    return ("ok" if green else "bad"), label, "\n".join(details)
+    return sum(1 for name in reference if groups.get(param_group(name), True) and not is_ignored(name, ignore)
+               and not always_skipped(name))
 
 
 # ---- журнал змін параметрів ----------------------------------------------------------------------
@@ -410,7 +383,8 @@ def load_journal(path=None, limit=JOURNAL_KEEP):
     path = Path(path or JOURNAL_PATH)
     try:
         with path.open(encoding="utf-8-sig", newline="") as handle:
-            rows = [row for row in csv.DictReader(handle, delimiter=";") if row.get("param")]
+            rows = [row for row in csv.DictReader(handle, delimiter=";")
+                    if row.get("param") and not always_skipped(row["param"])]
     except (OSError, csv.Error):
         return []
     return rows[-limit:]
@@ -462,7 +436,7 @@ def journal_changes(base, values, who_for):
     entries = []
     for name in sorted(set(base) | set(values)):
         old, new = base.get(name), values.get(name)
-        if old is not None and new is not None and same_value(old, new):
+        if always_skipped(name) or (old is not None and new is not None and same_value(old, new)):
             continue
         entries.append({"param": name, "old": journal_value(old), "new": journal_value(new), "who": who_for(name, new)})
     return entries
@@ -488,9 +462,6 @@ DEFAULT_CONFIG = {
     "reference": {"name": "", "values": {}, "time": ""},
     "ignore": list(DEFAULT_IGNORE),
     "compare_groups": {group: True for group, _title, _hint in CHECK_GROUPS},
-    "gps_badge": False,
-    "gps_badge_pos": "",
-    "gps_green": GPS_GREEN_NOCAL,
 }
 
 
@@ -540,8 +511,6 @@ def load_config():
             config["reference"] = checks_to_reference(data.get("checks"))
         config["ignore"] = clean_ignore(config.get("ignore")) if "ignore" in data else list(DEFAULT_IGNORE)
         config["compare_groups"] = clean_groups(config.get("compare_groups"))
-        if config.get("gps_green") not in (GPS_GREEN_NOCAL, GPS_GREEN_FIX):
-            config["gps_green"] = GPS_GREEN_NOCAL
         if int(data.get("config_version", 1)) < CONFIG_VERSION:
             # Старі версії підключалися лише через MAVLink Mirror — тепер «Автоматично».
             if config["connection"] in ("udpin:0.0.0.0:14551", "udpin:0.0.0.0:14550", ""):
@@ -933,23 +902,6 @@ class MavWorker(threading.Thread):
             name = name.rstrip("\x00")
             self.param_types[name] = message.param_type
             self._on_param(name, float(message.param_value))
-        elif kind == "GPS_RAW_INT":
-            # Лише читаємо те, що й так іде від політника до Mission Planner.
-            if self.link_ok and message.get_srcSystem() == self.target[0]:
-                self.emit("gps", "raw", int(message.fix_type), int(message.satellites_visible))
-        elif kind == "SYS_STATUS":
-            if self.link_ok and message.get_srcSystem() == self.target[0]:
-                bit = mavutil.mavlink.MAV_SYS_STATUS_SENSOR_GPS
-                if message.onboard_control_sensors_present & bit:
-                    self.emit("gps", "health", bool(message.onboard_control_sensors_health & bit), None)
-        elif kind == "STATUSTEXT":
-            if self.link_ok and message.get_srcSystem() == self.target[0]:
-                text = message.text
-                if isinstance(text, bytes):
-                    text = text.decode(errors="ignore")
-                text = text.rstrip("\x00").strip()
-                if "GPS" in text.upper():
-                    self.emit("gps", "text", text, None)
 
     def _on_param(self, name, value):
         previous = self.params.get(name)
@@ -1682,85 +1634,6 @@ class CompareWindow(tk.Toplevel):
         self.destroy()
 
 
-class GpsBadge(tk.Toplevel):
-    """Крихітне віконце поверх усіх: GPS. Колір — за вибраним правилом (за замовчуванням зелене = not calibrated)."""
-
-    def __init__(self, app):
-        super().__init__(app, bg=LINE)
-        self.app = app
-        self.drag = None
-        self.overrideredirect(True)
-        self.attributes("-topmost", True)
-        try:
-            self.attributes("-alpha", 0.96)
-        except tk.TclError:
-            pass
-        self.box = tk.Frame(self, bg=RAISED, padx=9, pady=3)
-        self.box.pack(fill="both", expand=True, padx=1, pady=1)
-        self.name = tk.Label(self.box, text="GPS", bg=RAISED, fg=MUTED, font=(FONT, 10, "bold"))
-        self.name.pack(side="left")
-        self.state = tk.Label(self.box, text="—", bg=RAISED, fg=MUTED, font=(FONT, 7, "bold"))
-        self.state.pack(side="left", padx=(6, 0), pady=(2, 0))
-        self.tip = Tip(self.box, "")
-        self.menu = tk.Menu(self, tearoff=False, bg=SURFACE, fg=TEXT, activebackground=RAISED,
-                            activeforeground=TEXT, bd=0)
-        self.green = tk.StringVar(value=app.config_data["gps_green"])
-        self.menu.add_radiobutton(label="Зелене, коли GPS not calibrated (без фіксу)", variable=self.green,
-                                  value=GPS_GREEN_NOCAL, command=self._set_green)
-        self.menu.add_radiobutton(label="Зелене, коли GPS має фікс", variable=self.green, value=GPS_GREEN_FIX,
-                                  command=self._set_green)
-        self.menu.add_separator()
-        self.menu.add_command(label="Відкрити Servo Trim Sync", command=app._show_main)
-        self.menu.add_command(label="Сховати GPS-віконце", command=app._toggle_gps_badge)
-        for widget in (self, self.box, self.name, self.state):
-            widget.bind("<ButtonPress-1>", self._press)
-            widget.bind("<B1-Motion>", self._move)
-            widget.bind("<ButtonRelease-1>", self._release)
-            widget.bind("<Double-Button-1>", lambda _e: app._show_main())
-            widget.bind("<Button-3>", self._popup)
-        position = str(app.config_data.get("gps_badge_pos") or "")
-        if position.startswith("+"):
-            self.geometry(position)
-        else:
-            self.update_idletasks()
-            self.geometry(f"+{max(0, self.winfo_screenwidth() - 190)}+{40}")
-
-    def _popup(self, event):
-        try:
-            self.menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            self.menu.grab_release()
-
-    def _set_green(self):
-        self.app.config_data["gps_green"] = self.green.get()
-        self.app._save_later()
-        self.app._update_gps_ui()
-
-    def _press(self, event):
-        self.drag = (event.x_root - self.winfo_x(), event.y_root - self.winfo_y())
-
-    def _move(self, event):
-        if self.drag:
-            self.geometry(f"+{event.x_root - self.drag[0]}+{event.y_root - self.drag[1]}")
-
-    def _release(self, _event):
-        if self.drag:
-            self.drag = None
-            self.app.config_data["gps_badge_pos"] = f"+{self.winfo_x()}+{self.winfo_y()}"
-            self.app._save_later()
-
-    def show(self, state, label, details):
-        bg = {"ok": "#238636", "bad": "#b62324"}.get(state, RAISED)
-        fg = "#ffffff" if state in ("ok", "bad") else MUTED
-        for widget in (self.box, self.name, self.state):
-            widget.configure(bg=bg)
-        self.name.configure(fg=fg)
-        self.state.configure(fg=fg, text=label)
-        rule = ("зелене = not calibrated (без фіксу)" if self.app.config_data["gps_green"] == GPS_GREEN_NOCAL
-                else "зелене = є фікс")
-        self.tip.text = f"{details}\n\nПравило: {rule}\nПравий клік — налаштування, перетягуйте мишею"
-
-
 class JournalWindow(tk.Toplevel):
     """Журнал змін параметрів: що й коли змінилося в політнику (за даними Mission Planner). Лише читання."""
 
@@ -1905,8 +1778,6 @@ class App(tk.Tk):
         self.plugin_status = None
         self.plugin_live = False
         self.compare_file = None
-        self.gps = {"fix": None, "sats": 0, "raw_time": 0.0, "health": None, "text": "", "text_time": 0.0}
-        self.gps_badge = None
         self.recent_writes = {}
         self.journal = load_journal()
         self.journal_base = load_journal_base()
@@ -1926,8 +1797,6 @@ class App(tk.Tk):
         self.after(10, lambda: dark_title_bar(self))
         if self.config_data.get("overlay"):
             self.after(300, self._toggle_overlay)
-        if self.config_data.get("gps_badge"):
-            self.after(350, self._toggle_gps_badge)
         self.after(50, self._poll_events)
         if self.config_data.get("autoconnect"):
             self.after(400, self._toggle_connection)
@@ -2017,9 +1886,6 @@ class App(tk.Tk):
                                         pady=5, bg=SURFACE, hover_bg=RAISED, fg=MUTED,
                                         tip="Перевірка налаштувань політника (лише читання)")
         self.checks_button.pack(side="right", padx=(0, 6))
-        self.gps_button = FlatButton(head, "● GPS", self._toggle_gps_badge, font=self.font_strong, padx=10, pady=5,
-                                     bg=SURFACE, hover_bg=RAISED, fg=FAINT, tip=" ")
-        self.gps_button.pack(side="right", padx=(0, 6))
         self.armed_label = self._label(head, "", ERR, (FONT, 9, "bold"))
         self.armed_label.pack(side="right", padx=(0, 10))
         self._line(self)
@@ -2258,36 +2124,6 @@ class App(tk.Tk):
         except tk.TclError:
             self.overlay = None
 
-    # ---- GPS-віконце ------------------------------------------------------------------------------
-    def _toggle_gps_badge(self):
-        if self.gps_badge is not None:
-            try:
-                self.config_data["gps_badge_pos"] = f"+{self.gps_badge.winfo_x()}+{self.gps_badge.winfo_y()}"
-                self.gps_badge.destroy()
-            except tk.TclError:
-                pass
-            self.gps_badge = None
-            self.config_data["gps_badge"] = False
-        else:
-            self.gps_badge = GpsBadge(self)
-            self.config_data["gps_badge"] = True
-        self._update_gps_ui()
-        self._save_later()
-
-    def _update_gps_ui(self):
-        state, label, details = gps_status(self.gps, self.link_ok, time.monotonic(), self.config_data["gps_green"])
-        color = {"ok": OK, "bad": ERR}.get(state, FAINT)
-        on = self.gps_badge is not None
-        self.gps_button.configure(text="● GPS")
-        self.gps_button.set_style(fg=color, bg=RAISED if on else SURFACE)
-        self.gps_button.tip.text = (f"GPS: {label}\n{details}\n\n"
-                                    + ("Сховати GPS-віконце" if on else "Показати маленьке GPS-віконце поверх усіх"))
-        if on:
-            try:
-                self.gps_badge.show(state, label, details)
-            except tk.TclError:
-                self.gps_badge = None
-
     # ---- журнал змін параметрів -----------------------------------------------------------------
     def _journal_update(self):
         """Порівнює свіжу копію таблиці MP з попередньою й записує, що змінилося. Політника не питає."""
@@ -2444,7 +2280,7 @@ class App(tk.Tk):
             result.update(state="bad", text=f"Щось не так ({len(diffs)})", color=ERR, details="\n".join(lines))
         elif not complete:
             absent = sum(1 for name in reference if name not in current and groups.get(param_group(name), True)
-                         and not is_ignored(name, ignore))
+                         and not is_ignored(name, ignore) and not always_skipped(name))
             result.update(state="partial", text=f"перевірено {checked - absent} з {checked}", color=WARN,
                           details=f"Відмінностей немає серед {checked - absent} параметрів, які є в {where}.\n"
                                   f"Ще {absent} MP не завантажив — у MP: Config → Full Parameter List → "
@@ -3226,14 +3062,6 @@ class App(tk.Tk):
                     refresh = True
                 elif kind == "wrote":
                     self.recent_writes[event[1]] = (time.monotonic(), event[2])
-                elif kind == "gps":
-                    now = time.monotonic()
-                    if event[1] == "raw":
-                        self.gps.update(fix=event[2], sats=event[3], raw_time=now)
-                    elif event[1] == "health":
-                        self.gps["health"] = event[2]
-                    elif event[1] == "text":
-                        self.gps.update(text=event[2], text_time=now)
         except queue.Empty:
             pass
         now = time.monotonic()
@@ -3242,7 +3070,6 @@ class App(tk.Tk):
             self._read_snapshot()
             self._journal_update()
             self._update_checks_ui()
-            self._update_gps_ui()
             if self.journal_window is not None:
                 try:
                     self.journal_window.update_live()
@@ -3280,11 +3107,6 @@ class App(tk.Tk):
         if self.overlay is not None:
             try:
                 self.config_data["overlay_pos"] = f"+{self.overlay.winfo_x()}+{self.overlay.winfo_y()}"
-            except tk.TclError:
-                pass
-        if self.gps_badge is not None:
-            try:
-                self.config_data["gps_badge_pos"] = f"+{self.gps_badge.winfo_x()}+{self.gps_badge.winfo_y()}"
             except tk.TclError:
                 pass
         save_config(self._collect_config())
