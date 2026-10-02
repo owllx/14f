@@ -37,7 +37,7 @@ from pymavlink.dialects.v10 import ardupilotmega as _dialect_v10  # noqa: E402,F
 from pymavlink.dialects.v20 import ardupilotmega as _dialect_v20  # noqa: E402,F401
 
 APP_NAME = "Servo Trim Sync"
-APP_VERSION = "1.9"
+APP_VERSION = "1.9.1"
 CONFIG_DIR = Path(os.environ.get("APPDATA", tempfile.gettempdir())) / "ServoTrimSync"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 AUTO_SOURCE = "auto"
@@ -194,6 +194,7 @@ CHECK_PARAM_RE = re.compile(r"^[A-Z0-9_]{1,16}$")
 IGNORE_RE = re.compile(r"^[A-Z0-9_*?\[\]]{1,24}$")
 TUNING_RE = re.compile(r"^((RLL|PTCH|YAW)(_RATE_|2SRV_)|ATC_|NAVL1_|TECS_|PSC_|THR_|TRIM_|STEER2SRV_|LIM_)")
 SNAPSHOT_FILE = "ServoTrimSync.params"
+SNAPSHOT_STALL_S = 15.0   # стільки секунд кількість параметрів у MP не росте — завантаження зупинилося
 # Значення, які живуть своїм життям (калібровки, лічильники, ID датчиків) або які веде сама програма:
 # у еталоні вони майже завжди «не такі», тож за замовчуванням не звіряються. Список можна міняти.
 DEFAULT_IGNORE = (
@@ -333,7 +334,8 @@ def read_mp_snapshot(path=None):
             return 0
 
     return {"values": values, "connected": header.get("connected", "").lower() == "true",
-            "sysid": number("sysid"), "count": number("count") or len(values), "total": number("total"),
+            "sysid": number("sysid"), "compid": number("compid"), "count": number("count") or len(values),
+            "total": number("total"), "link": header.get("link", ""), "mavs": header.get("mavs", ""),
             "mtime": mtime}
 
 
@@ -1578,6 +1580,7 @@ class App(tk.Tk):
         self.checks_window = None
         self.snapshot = None
         self.snapshot_mtime = None
+        self.snapshot_changed = 0.0
         self.plugin_status = None
         self.plugin_live = False
         self.compare_file = None
@@ -1932,6 +1935,8 @@ class App(tk.Tk):
         if mtime != self.snapshot_mtime:
             snapshot = read_mp_snapshot(path)
             if snapshot is not None:
+                if self.snapshot is None or snapshot["count"] != self.snapshot["count"]:
+                    self.snapshot_changed = time.monotonic()
                 self.snapshot, self.snapshot_mtime = snapshot, mtime
 
     def _snapshot_text(self):
@@ -1943,11 +1948,22 @@ class App(tk.Tk):
         if "snapshot" not in self.plugin_status:
             return "плагін старої версії — оновіть його в Налаштуваннях і перезапустіть MP"
         if snapshot is None or not snapshot["values"]:
-            return "MP ще не завантажив параметри політника"
-        link = f"SYSID {snapshot['sysid']}" if snapshot["connected"] else "не підключений (останні завантажені)"
+            seen = f" (пристрої в MP: {snapshot['mavs']})" if snapshot and snapshot.get("mavs") else ""
+            return ("MP ще не завантажив параметри політника — у MP: Config → Full Parameter List → "
+                    f"Refresh Params{seen}")
+        link = (f"SYSID {snapshot['sysid']}" + (f" · {snapshot['link']}" if snapshot.get("link") else "")
+                if snapshot["connected"] else "не підключений (останні завантажені)")
+        if self._snapshot_partial():
+            return f"{link} · MP завантажив лише {snapshot['count']} з {snapshot['total']} параметрів"
         if snapshot["total"] and snapshot["count"] < snapshot["total"]:
             return f"{link} · завантажує параметри {snapshot['count']} / {snapshot['total']}"
         return f"{link} · {len(snapshot['values'])} параметрів"
+
+    def _snapshot_partial(self):
+        """MP перестав завантажувати, не добравши до кінця (буває на повільному UDP/радіо) — звіряємо що є."""
+        snapshot = self.snapshot
+        return bool(snapshot and snapshot["total"] and snapshot["count"] < snapshot["total"]
+                    and time.monotonic() - self.snapshot_changed > SNAPSHOT_STALL_S)
 
     def _compare(self):
         """Звірка еталона: dict(state, text, color, details, diffs, checked) або None, якщо еталона немає."""
@@ -1966,11 +1982,14 @@ class App(tk.Tk):
                 result.update(state="none", text="немає даних з MP", color=FAINT,
                               details="Звіряти нема з чим: " + self._snapshot_text())
                 return result
-            if snapshot["total"] and snapshot["count"] < snapshot["total"]:
+            partial = self._snapshot_partial()
+            if snapshot["total"] and snapshot["count"] < snapshot["total"] and not partial:
                 result.update(state="wait", text=f"завантаження {snapshot['count']}/{snapshot['total']}",
                               color=MUTED, details="Mission Planner ще завантажує параметри політника")
                 return result
-            current, complete, where = snapshot["values"], True, "Mission Planner"
+            # Неповна таблиця: відсутні параметри не вважаємо помилкою — їх просто ще немає в MP.
+            current, complete = snapshot["values"], not partial
+            where = "Mission Planner" + (f" (завантажено {snapshot['count']} з {snapshot['total']})" if partial else "")
         diffs = compare_params(reference, current, ignore, groups, complete)
         result["diffs"] = diffs
         if diffs:
@@ -1980,6 +1999,13 @@ class App(tk.Tk):
             if len(diffs) > 12:
                 lines.append(f"…і ще {len(diffs) - 12}")
             result.update(state="bad", text=f"Щось не так ({len(diffs)})", color=ERR, details="\n".join(lines))
+        elif not complete:
+            absent = sum(1 for name in reference if name not in current and groups.get(param_group(name), True)
+                         and not is_ignored(name, ignore))
+            result.update(state="partial", text=f"перевірено {checked - absent} з {checked}", color=WARN,
+                          details=f"Відмінностей немає серед {checked - absent} параметрів, які є в {where}.\n"
+                                  f"Ще {absent} MP не завантажив — у MP: Config → Full Parameter List → "
+                                  "Refresh Params")
         else:
             result.update(state="ok", text="OK", color=OK,
                           details=f"Усі {checked} параметрів еталона збігаються з {where}")
@@ -2002,7 +2028,7 @@ class App(tk.Tk):
         else:
             state, text, color, details = summary
             label = {"ok": "✓ Налаштування OK", "bad": f"✕ {text}", "wait": "Завантаження…",
-                     "none": "Перевірка"}[state]
+                     "partial": "Перевірено частково", "none": "Перевірка"}[state]
             self.checks_button.configure(text=label)
             self.checks_button.set_style(fg=color)
             self.checks_button.tip.text = details

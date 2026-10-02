@@ -55,7 +55,7 @@ namespace ServoTrimSyncRefresh
         private static readonly Dictionary<Type, PropertyInfo> ParamNameProperty = new Dictionary<Type, PropertyInfo>();
 
         public override string Name { get { return "Servo Trim Sync — live SERVO MIN/TRIM/MAX"; } }
-        public override string Version { get { return "1.1"; } }
+        public override string Version { get { return "1.2"; } }
         public override string Author { get { return "Servo Trim Sync"; } }
 
         public override bool Init()
@@ -253,19 +253,65 @@ namespace ServoTrimSyncRefresh
         }
 
         // Копія параметрів, які MP уже має в пам'яті (жодних запитів до політника).
+        // Через UDP/радіо MP часто бачить кілька пристроїв (політник, підвіс, компаньйон, радіомодем)
+        // і «поточним» може стати той, що без параметрів, — тож беремо пристрій з найбільшою таблицею.
         private void WriteSnapshot()
         {
             lastSnapshot = DateTime.Now;
             try
             {
-                var port = MainV2.comPort;
-                var list = port.MAV.param;
+                var main = MainV2.comPort;
+                var ports = new List<MAVLinkInterface>();
+                if (main != null)
+                    ports.Add(main);
+                foreach (var item in Enumerate(GetMember(typeof(MainV2), null, "Comports")))
+                {
+                    var other = item as MAVLinkInterface;
+                    if (other != null && !ports.Contains(other))
+                        ports.Add(other);
+                }
+
+                MAVState best = null;
+                MAVLinkInterface bestPort = null;
+                var seen = new List<MAVState>();
+                var mavs = new StringBuilder();
+                foreach (var candidatePort in ports)
+                {
+                    var states = new List<MAVState>();
+                    if (candidatePort.MAV != null)
+                        states.Add(candidatePort.MAV);
+                    foreach (var item in Enumerate(GetMember(candidatePort.GetType(), candidatePort, "MAVlist")))
+                    {
+                        var state = item as MAVState;
+                        if (state != null)
+                            states.Add(state);
+                    }
+                    foreach (var state in states)
+                    {
+                        if (seen.Contains(state) || state.param == null)
+                            continue;
+                        seen.Add(state);
+                        mavs.AppendFormat("{0}:{1}={2};", state.sysid, GetMember(state.GetType(), state, "compid"),
+                            state.param.Count);
+                        if (best == null || state.param.Count > best.param.Count)
+                        {
+                            best = state;
+                            bestPort = candidatePort;
+                        }
+                    }
+                }
+                if (best == null)
+                    return;
+
+                var list = best.param;
+                var stream = bestPort.BaseStream;
                 var lines = new StringBuilder();
-                var connected = port.BaseStream != null && port.BaseStream.IsOpen;
                 lines.AppendFormat(System.Globalization.CultureInfo.InvariantCulture,
-                    "#connected={0},sysid={1},count={2},total={3}\n", connected, port.MAV.sysid, list.Count,
-                    list.TotalReported);
-                foreach (var param in list.ToList().OrderBy(p => p.Name))
+                    "#connected={0},sysid={1},compid={2},count={3},total={4},link={5},mavs={6}\n",
+                    stream != null && stream.IsOpen, best.sysid, GetMember(best.GetType(), best, "compid"),
+                    list.Count, list.TotalReported, stream == null ? "" : stream.GetType().Name,
+                    mavs.ToString().TrimEnd(';'));
+                foreach (var param in list.ToList().Where(p => p != null && p.Name != null).OrderBy(p => p.Name))
                     lines.Append(param.Name).Append(',')
                         .Append(param.Value.ToString("R", System.Globalization.CultureInfo.InvariantCulture))
                         .Append('\n');
@@ -279,11 +325,51 @@ namespace ServoTrimSyncRefresh
                     File.Delete(SnapshotPath);
                 File.Move(temp, SnapshotPath);
                 lastSnapshotText = text;
+                if (lastError.StartsWith("snapshot:"))
+                    lastError = "";
             }
             catch (Exception ex)
             {
+                // Найчастіше — MP саме дописує таблицю під час завантаження; наступна спроба через 3 с.
                 lastError = "snapshot: " + ex.Message;
             }
+        }
+
+        // Поле або властивість за назвою (без жорсткої прив'язки до версії Mission Planner).
+        private static object GetMember(Type type, object target, string name)
+        {
+            var flags = BindingFlags.Public | BindingFlags.NonPublic |
+                        (target == null ? BindingFlags.Static : BindingFlags.Instance);
+            try
+            {
+                var field = type.GetField(name, flags);
+                if (field != null)
+                    return field.GetValue(target);
+                var property = type.GetProperty(name, flags);
+                if (property != null && property.GetIndexParameters().Length == 0)
+                    return property.GetValue(target, null);
+            }
+            catch
+            {
+            }
+            return null;
+        }
+
+        private static IEnumerable<object> Enumerate(object value)
+        {
+            var items = new List<object>();
+            var sequence = value as IEnumerable;
+            if (sequence == null || value is string)
+                return items;
+            try
+            {
+                foreach (var item in sequence)
+                    items.Add(item);
+            }
+            catch
+            {
+            }
+            return items;
         }
 
         private void WriteStatus()
