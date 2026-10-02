@@ -6,6 +6,10 @@
 // Плагін одразу підставляє на них нові значення — без запису в політник і без змін
 // у вашій роботі: поле, яке ви саме редагуєте, і рядки зі збереженими вами змінами не чіпаються.
 //
+// Також раз на кілька секунд кладе в TEMP копію таблиці параметрів, яку Mission Planner уже
+// завантажив (ServoTrimSync.params) — Servo Trim Sync лише порівнює її з еталоном.
+// Плагін нічого не надсилає політнику і нічого не змінює: тільки читає.
+//
 // Встановлення: скопіювати цей файл у папку «plugins» поруч із MissionPlanner.exe
 // і перезапустити Mission Planner (або кнопкою в Servo Trim Sync → налаштування).
 
@@ -33,6 +37,10 @@ namespace ServoTrimSyncRefresh
 
         // Самодіагностика: Servo Trim Sync читає цей файл і показує, чи плагін працює.
         private static readonly string StatusPath = Path.Combine(Path.GetTempPath(), "ServoTrimSyncRefresh.status");
+        private static readonly string SnapshotPath = Path.Combine(Path.GetTempPath(), "ServoTrimSync.params");
+        private DateTime lastSnapshot = DateTime.MinValue;
+        private string lastSnapshotText = "";
+        private int snapshotCount = -1;
         private DateTime loadedAt = DateTime.Now;
         private DateTime lastStatus = DateTime.MinValue;
         private long packets;
@@ -47,7 +55,7 @@ namespace ServoTrimSyncRefresh
         private static readonly Dictionary<Type, PropertyInfo> ParamNameProperty = new Dictionary<Type, PropertyInfo>();
 
         public override string Name { get { return "Servo Trim Sync — live SERVO MIN/TRIM/MAX"; } }
-        public override string Version { get { return "1.0"; } }
+        public override string Version { get { return "1.1"; } }
         public override string Author { get { return "Servo Trim Sync"; } }
 
         public override bool Init()
@@ -105,6 +113,8 @@ namespace ServoTrimSyncRefresh
         {
             if ((DateTime.Now - lastStatus).TotalSeconds >= 2)
                 WriteStatus();
+            if ((DateTime.Now - lastSnapshot).TotalSeconds >= 3)
+                WriteSnapshot();
             try
             {
                 var current = MainV2.comPort;
@@ -238,25 +248,42 @@ namespace ServoTrimSyncRefresh
                 number.setup(800, 2200, 1, 1, param, parameters);
                 return true;
             }
-            var numeric = control as NumericUpDown;
-            if (numeric != null)
-            {
-                if (numeric.Value == value)
-                    return false;
-                if (value < numeric.Minimum)
-                    numeric.Minimum = value;
-                if (value > numeric.Maximum)
-                    numeric.Maximum = value;
-                numeric.Value = value; // те саме значення, що вже в політнику — повторний запис нешкідливий
-                return true;
-            }
-            var text = ((float)parameters[param]).ToString(System.Globalization.CultureInfo.InvariantCulture);
-            if ((control is TextBox || control is Label) && control.Text != text)
-            {
-                control.Text = text;
-                return true;
-            }
+            // Інші типи полів не чіпаємо: зміна їхнього значення могла б змусити MP записати параметр.
             return false;
+        }
+
+        // Копія параметрів, які MP уже має в пам'яті (жодних запитів до політника).
+        private void WriteSnapshot()
+        {
+            lastSnapshot = DateTime.Now;
+            try
+            {
+                var port = MainV2.comPort;
+                var list = port.MAV.param;
+                var lines = new StringBuilder();
+                var connected = port.BaseStream != null && port.BaseStream.IsOpen;
+                lines.AppendFormat(System.Globalization.CultureInfo.InvariantCulture,
+                    "#connected={0},sysid={1},count={2},total={3}\n", connected, port.MAV.sysid, list.Count,
+                    list.TotalReported);
+                foreach (var param in list.ToList().OrderBy(p => p.Name))
+                    lines.Append(param.Name).Append(',')
+                        .Append(param.Value.ToString("R", System.Globalization.CultureInfo.InvariantCulture))
+                        .Append('\n');
+                snapshotCount = list.Count;
+                var text = lines.ToString();
+                if (text == lastSnapshotText && File.Exists(SnapshotPath))
+                    return;
+                var temp = SnapshotPath + ".tmp";
+                File.WriteAllText(temp, text);
+                if (File.Exists(SnapshotPath))
+                    File.Delete(SnapshotPath);
+                File.Move(temp, SnapshotPath);
+                lastSnapshotText = text;
+            }
+            catch (Exception ex)
+            {
+                lastError = "snapshot: " + ex.Message;
+            }
         }
 
         private void WriteStatus()
@@ -266,10 +293,10 @@ namespace ServoTrimSyncRefresh
             {
                 File.WriteAllText(StatusPath, string.Format(
                     "loaded={0:o}\nnow={1:o}\nsubscribed={2}\npackets={3}\nservo_values={4}\nrefreshed={5}\n" +
-                    "controls_seen={6}\nscanned={7}\ntypes={8}\npages={9}\nerror={10}\n",
+                    "controls_seen={6}\nscanned={7}\ntypes={8}\npages={9}\nerror={10}\nsnapshot={11}\n",
                     loadedAt, DateTime.Now, port != null, Interlocked.Read(ref packets),
                     Interlocked.Read(ref servoValues), refreshed, controlsSeen, scanned, candidateTypes, pages,
-                    lastError.Replace("\n", " ")));
+                    lastError.Replace("\n", " "), snapshotCount));
             }
             catch
             {

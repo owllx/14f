@@ -13,6 +13,7 @@ MAVLink Mirror на UDP 14551, якщо його ввімкнено.
 """
 
 import base64
+import fnmatch
 import json
 import os
 import queue
@@ -36,7 +37,7 @@ from pymavlink.dialects.v10 import ardupilotmega as _dialect_v10  # noqa: E402,F
 from pymavlink.dialects.v20 import ardupilotmega as _dialect_v20  # noqa: E402,F401
 
 APP_NAME = "Servo Trim Sync"
-APP_VERSION = "1.8"
+APP_VERSION = "1.9"
 CONFIG_DIR = Path(os.environ.get("APPDATA", tempfile.gettempdir())) / "ServoTrimSync"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 AUTO_SOURCE = "auto"
@@ -184,60 +185,60 @@ TUNING_PARAMS = (
     "ATC_ANG_RLL_P", "ATC_ANG_PIT_P", "ATC_ANG_YAW_P",
 )
 CHECK_GROUPS = (
-    ("servo", "Servo Output", "FUNCTION виходів"),
-    ("serial", "Serial Ports", "PROTOCOL портів"),
-    ("tuning", "Basic Tuning", "PID і налаштування"),
-    ("custom", "Інше", "будь-які параметри"),
+    ("servo", "Servo Output", "SERVOn_FUNCTION, REVERSED тощо"),
+    ("serial", "Serial Ports", "SERIALn_PROTOCOL, BAUD тощо"),
+    ("tuning", "Basic Tuning", "PID, TECS, L1 тощо"),
+    ("other", "Інше", "усі інші параметри"),
 )
 CHECK_PARAM_RE = re.compile(r"^[A-Z0-9_]{1,16}$")
-CHECK_MISSING_S = 12.0   # не відповів стільки після підключення — параметра, певно, немає
+IGNORE_RE = re.compile(r"^[A-Z0-9_*?\[\]]{1,24}$")
+TUNING_RE = re.compile(r"^((RLL|PTCH|YAW)(_RATE_|2SRV_)|ATC_|NAVL1_|TECS_|PSC_|THR_|TRIM_|STEER2SRV_|LIM_)")
+SNAPSHOT_FILE = "ServoTrimSync.params"
+# Значення, які живуть своїм життям (калібровки, лічильники, ID датчиків) або які веде сама програма:
+# у еталоні вони майже завжди «не такі», тож за замовчуванням не звіряються. Список можна міняти.
+DEFAULT_IGNORE = (
+    "STAT_*", "SYS_NUM_RESETS", "FORMAT_VERSION", "SYSID_SW_MREV", "SYSID_SW_TYPE", "BRD_SERIAL_NUM",
+    "COMPASS_OFS*", "COMPASS_DIA*", "COMPASS_ODI*", "COMPASS_MOT*", "COMPASS_DEV_ID*", "COMPASS_PRIO*",
+    "COMPASS_SCALE*", "INS_ACC*OFFS*", "INS_ACC*SCAL*", "INS_GYR*OFFS*", "INS_ACC*_ID", "INS_GYR*_ID",
+    "INS_TCAL*", "BARO*_GND_PRESS", "BARO*_DEVID", "GND_ABS_PRESS", "GND_TEMP", "AHRS_TRIM_*",
+    "ARSPD*_OFFSET", "RC*_MIN", "RC*_MAX", "RC*_TRIM", "CMD_TOTAL", "CMD_INDEX", "MIS_TOTAL",
+    "FENCE_TOTAL", "RALLY_TOTAL", "LOG_LASTFILE",
+    *(f"SERVO{channel}_{kind}" for channel in SERVO_CHANNELS for kind in ("MIN", "TRIM", "MAX")),
+)
 
 
-def check_suggestions(group):
-    if group == "servo":
-        return [f"SERVO{n}_FUNCTION" for n in range(1, 17)]
-    if group == "serial":
-        return [f"SERIAL{n}_PROTOCOL" for n in range(0, 9)]
-    if group == "tuning":
-        return list(TUNING_PARAMS)
-    return []
+def param_group(name):
+    if name.startswith("SERVO"):
+        return "servo"
+    if name.startswith("SERIAL"):
+        return "serial"
+    if name in TUNING_PARAMS or TUNING_RE.match(name):
+        return "tuning"
+    return "other"
 
 
-def check_choices(group):
-    table = SERVO_FUNCTIONS if group == "servo" else SERIAL_PROTOCOLS if group == "serial" else None
-    return [f"{value} — {name}" for value, name in sorted(table.items())] if table else []
-
-
-def value_label(group, value):
-    """Число → «70 — Throttle» для FUNCTION/PROTOCOL, інакше просто число."""
+def value_label(name, value):
+    """Число → «70 — Throttle» для SERVOn_FUNCTION і SERIALn_PROTOCOL, інакше просто число."""
     if value is None:
         return "—"
-    table = SERVO_FUNCTIONS if group == "servo" else SERIAL_PROTOCOLS if group == "serial" else None
+    table = (SERVO_FUNCTIONS if re.match(r"^SERVO\d+_FUNCTION$", name)
+             else SERIAL_PROTOCOLS if re.match(r"^SERIAL\d_PROTOCOL$", name) else None)
     number = float(value)
     if table is not None and number.is_integer() and int(number) in table:
         return f"{int(number)} — {table[int(number)]}"
-    return f"{number:g}"
+    return f"{number:.7g}"
+
+
+def same_value(a, b):
+    """Політник зберігає float32, а файли пишуть 6–7 знаків — порівнюємо з урахуванням округлення."""
+    a, b = float(a), float(b)
+    return abs(a - b) <= 1e-6 or abs(a - b) <= 1e-5 * max(abs(a), abs(b))
 
 
 def parse_number(text):
-    """«70 — Throttle» → 70.0; «0,15» → 0.15; порожньо/не число → None."""
-    match = re.match(r"\s*([-+]?\d+(?:[.,]\d+)?)", str(text or ""))
+    """«70 — Throttle» → 70.0; «0,15» → 0.15; «1e-05» → 1e-05; порожньо/не число → None."""
+    match = re.match(r"\s*([-+]?(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:[eE][-+]?\d+)?)", str(text or ""))
     return float(match.group(1).replace(",", ".")) if match else None
-
-
-def clean_checks(items):
-    checks = []
-    for item in items if isinstance(items, list) else []:
-        try:
-            param = str(item.get("param", "")).strip().upper()
-            group = item.get("group") if item.get("group") in {g[0] for g in CHECK_GROUPS} else "custom"
-            expected = str(item.get("expected", "")).strip()
-            tolerance = str(item.get("tolerance", "0")).strip() or "0"
-        except AttributeError:
-            continue
-        if CHECK_PARAM_RE.match(param) and parse_number(expected) is not None:
-            checks.append({"group": group, "param": param, "expected": expected, "tolerance": tolerance})
-    return checks
 
 
 def parse_param_file(text):
@@ -253,6 +254,107 @@ def parse_param_file(text):
             if number is not None:
                 values[parts[0].upper()] = number
     return values
+
+
+def clean_ignore(items):
+    if isinstance(items, str):
+        items = re.split(r"[\s,;]+", items)
+    patterns = []
+    for item in items if isinstance(items, (list, tuple)) else []:
+        pattern = str(item).strip().upper()
+        if IGNORE_RE.match(pattern) and pattern not in patterns:
+            patterns.append(pattern)
+    return patterns
+
+
+def is_ignored(name, patterns):
+    return any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)
+
+
+def clean_reference(data):
+    """{"name", "values": {ПАРАМЕТР: число}, "time"} — лише валідні записи."""
+    if not isinstance(data, dict):
+        return {"name": "", "values": {}, "time": ""}
+    values = {}
+    raw = data.get("values")
+    for name, value in (raw.items() if isinstance(raw, dict) else []):
+        name = str(name).strip().upper()
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if CHECK_PARAM_RE.match(name) and number == number:
+            values[name] = number
+    return {"name": str(data.get("name", ""))[:120], "values": values, "time": str(data.get("time", ""))[:40]}
+
+
+def checks_to_reference(items):
+    """Перевірки з версій 1.7–1.8 → еталон."""
+    values = {}
+    for item in items if isinstance(items, list) else []:
+        try:
+            name = str(item.get("param", "")).strip().upper()
+            number = parse_number(item.get("expected"))
+        except AttributeError:
+            continue
+        if CHECK_PARAM_RE.match(name) and number is not None:
+            values[name] = number
+    return {"name": "перевірки з попередньої версії", "values": values, "time": ""} if values else None
+
+
+def clean_groups(data):
+    data = data if isinstance(data, dict) else {}
+    return {group: bool(data.get(group, True)) for group, _title, _hint in CHECK_GROUPS}
+
+
+def read_mp_snapshot(path=None):
+    """Копія таблиці параметрів, яку Mission Planner уже завантажив (пише плагін). None — файлу немає."""
+    path = Path(path or Path(tempfile.gettempdir()) / SNAPSHOT_FILE)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    lines = text.splitlines()
+    header = {}
+    if lines and lines[0].startswith("#"):
+        header = dict(item.split("=", 1) for item in lines[0][1:].split(",") if "=" in item)
+    values = {}
+    for line in lines[1:] if header else lines:
+        name, _sep, value = line.partition(",")
+        number = parse_number(value)
+        if CHECK_PARAM_RE.match(name) and number is not None:
+            values[name] = number
+
+    def number(key):
+        try:
+            return int(float(header.get(key, "0")))
+        except ValueError:
+            return 0
+
+    return {"values": values, "connected": header.get("connected", "").lower() == "true",
+            "sysid": number("sysid"), "count": number("count") or len(values), "total": number("total"),
+            "mtime": mtime}
+
+
+def compare_params(reference, current, ignore, groups, complete=True):
+    """Різниці: [(параметр, розділ, еталон, зараз)]; «зараз» = None — у політнику такого параметра немає."""
+    diffs = []
+    for name in sorted(reference):
+        group = param_group(name)
+        if not groups.get(group, True) or is_ignored(name, ignore):
+            continue
+        actual = current.get(name)
+        if actual is None:
+            if complete:
+                diffs.append((name, group, reference[name], None))
+        elif not same_value(reference[name], actual):
+            diffs.append((name, group, reference[name], actual))
+    return diffs
+
+
+def checked_count(reference, ignore, groups):
+    return sum(1 for name in reference if groups.get(param_group(name), True) and not is_ignored(name, ignore))
 
 
 DEFAULT_CONFIG = {
@@ -272,7 +374,9 @@ DEFAULT_CONFIG = {
     "geometry": "",
     "overlay": False,
     "overlay_pos": "",
-    "checks": [],
+    "reference": {"name": "", "values": {}, "time": ""},
+    "ignore": list(DEFAULT_IGNORE),
+    "compare_groups": {group: True for group, _title, _hint in CHECK_GROUPS},
 }
 
 
@@ -317,7 +421,11 @@ def load_config():
                 output["mode"] = MODE_OFFSETS
             outputs.append(output)
         config["outputs"] = outputs
-        config["checks"] = clean_checks(config.get("checks"))
+        config["reference"] = clean_reference(config.get("reference"))
+        if "reference" not in data and checks_to_reference(data.get("checks")):
+            config["reference"] = checks_to_reference(data.get("checks"))
+        config["ignore"] = clean_ignore(config.get("ignore")) if "ignore" in data else list(DEFAULT_IGNORE)
+        config["compare_groups"] = clean_groups(config.get("compare_groups"))
         if int(data.get("config_version", 1)) < CONFIG_VERSION:
             # Старі версії підключалися лише через MAVLink Mirror — тепер «Автоматично».
             if config["connection"] in ("udpin:0.0.0.0:14551", "udpin:0.0.0.0:14550", ""):
@@ -477,7 +585,6 @@ class MavWorker(threading.Thread):
         self.pending = {}
         self.param_types = {}
         self.deferred = {}
-        self.watch = set()
 
     # ---- службове ---------------------------------------------------------------------
     def emit(self, *event):
@@ -517,9 +624,6 @@ class MavWorker(threading.Thread):
             self.log("Відключено")
         elif kind == "rules":
             self.rules, self.only_disarmed = command[1], command[2]
-            self._request_sources()
-        elif kind == "watch":
-            self.watch = set(command[1])
             self._request_sources()
         elif kind == "apply_all":
             self._apply_all(command[1] if len(command) > 1 else None, command[2] if len(command) > 2 else False)
@@ -749,8 +853,7 @@ class MavWorker(threading.Thread):
         self.last_refresh = time.monotonic()
         names = {source for rule in self.rules if rule["enabled"] for source in rule["sources"]}
         names |= {rule["target"] for rule in self.rules if rule["enabled"]}
-        names &= WRITABLE_PARAMS  # свої параметри SERVO
-        names |= self.watch       # параметри для перевірок — ЛИШЕ читання, у запис не потрапляють ніколи
+        names &= WRITABLE_PARAMS  # лише свої SERVO6–10; перевірка налаштувань нічого в політника не питає
         for name in sorted(names):
             self.master.mav.param_request_read_send(self.target[0], self.target[1], name.encode(), -1)
 
@@ -1176,16 +1279,18 @@ class MiniMonitor(tk.Toplevel):
                 label.configure(text="—" if value is None else f"{value:g}", fg=color)
 
 
-class ChecksWindow(tk.Toplevel):
-    """Перевірки налаштувань: що має стояти в політнику → що стоїть насправді. Лише читання."""
+class CompareWindow(tk.Toplevel):
+    """Перевірка налаштувань: еталон (.param) ↔ параметри, які Mission Planner уже завантажив. Лише дивимось."""
+
+    COLUMNS = (("param", "ПАРАМЕТР", 190), ("expected", "МАЄ БУТИ (ЕТАЛОН)", 210), ("actual", "ЗАРАЗ", 210),
+               ("group", "РОЗДІЛ", 120))
 
     def __init__(self, app):
         super().__init__(app, bg=BG)
         self.app = app
-        self.title("Перевірки налаштувань")
+        self.signature = None
+        self.title("Перевірка налаштувань")
         self.resizable(False, False)
-        self.group = "servo"
-        self.rows = {group: [] for group, _title, _hint in CHECK_GROUPS}
         self.protocol("WM_DELETE_WINDOW", self._close)
         body = tk.Frame(self, bg=BG, padx=18, pady=14)
         body.pack(fill="both", expand=True)
@@ -1194,273 +1299,251 @@ class ChecksWindow(tk.Toplevel):
         top.pack(fill="x")
         titles = tk.Frame(top, bg=BG)
         titles.pack(side="left")
-        tk.Label(titles, text="Перевірки налаштувань", bg=BG, fg=TEXT, font=app.font_title).pack(anchor="w")
-        tk.Label(titles, text="Лише читання й звірка — у політнику нічого не змінюється", bg=BG, fg=MUTED,
-                 font=(FONT, 9)).pack(anchor="w")
-        self.summary = tk.Label(top, text="", bg=BG, fg=MUTED, font=app.font_strong)
+        tk.Label(titles, text="Перевірка налаштувань", bg=BG, fg=TEXT, font=app.font_title).pack(anchor="w")
+        tk.Label(titles, text="Лише дивимось: еталон ↔ параметри, які Mission Planner уже завантажив. "
+                              "Нічого не змінюється.", bg=BG, fg=MUTED, font=(FONT, 9)).pack(anchor="w")
+        self.summary = tk.Label(top, text="", bg=BG, fg=MUTED, font=(FONT, 12, "bold"))
         self.summary.pack(side="right")
 
-        tabs = tk.Frame(body, bg=BG)
-        tabs.pack(fill="x", pady=(14, 8))
-        self.tab_buttons = {}
+        card = tk.Frame(body, bg=SURFACE, padx=14, pady=10)
+        card.pack(fill="x", pady=(14, 0))
+        for row, caption in ((0, "ЕТАЛОН"), (1, "ЗВІРЯЮ З")):
+            tk.Label(card, text=caption, bg=SURFACE, fg=FAINT, font=(FONT, 8, "bold"), width=11, anchor="w").grid(
+                row=row, column=0, sticky="w", pady=3)
+        self.reference_label = tk.Label(card, text="", bg=SURFACE, fg=TEXT, font=app.font_strong, anchor="w")
+        self.reference_label.grid(row=0, column=1, sticky="w")
+        self.source_label = tk.Label(card, text="", bg=SURFACE, fg=MUTED, font=(FONT, 9), anchor="w",
+                                     justify="left")
+        self.source_label.grid(row=1, column=1, sticky="w")
+        card.columnconfigure(1, weight=1, minsize=430)
+        buttons = tk.Frame(card, bg=SURFACE)
+        buttons.grid(row=0, column=2, sticky="e")
+        FlatButton(buttons, "З .param файлу…", self._load_reference, padx=10, pady=4, bg=RAISED, fg=ACCENT,
+                   hover_bg=LINE, tip="Еталон — файл параметрів Mission Planner\n"
+                                      "(Config → Full Parameter List → Save)").pack(side="left")
+        FlatButton(buttons, "Взяти з MP", self._take_from_mp, padx=10, pady=4, bg=RAISED, hover_bg=LINE,
+                   tip="Зробити еталоном те, що зараз завантажив Mission Planner\n"
+                       "(змінюється лише конфіг програми)").pack(side="left", padx=(6, 0))
+        self.source_button = FlatButton(card, "", self._toggle_source, padx=10, pady=4, bg=RAISED, hover_bg=LINE,
+                                        tip=" ")
+        self.source_button.grid(row=1, column=2, sticky="e")
+
+        groups = tk.Frame(body, bg=BG)
+        groups.pack(fill="x", pady=(12, 6))
+        tk.Label(groups, text="ЗВІРЯТИ", bg=BG, fg=FAINT, font=(FONT, 8, "bold")).pack(side="left", padx=(0, 8))
+        self.group_buttons = {}
         for group, title, hint in CHECK_GROUPS:
-            button = FlatButton(tabs, title, lambda g=group: self._show_group(g), font=(FONT, 9, "bold"),
-                                padx=12, pady=5, tip=hint)
-            button.pack(side="left", padx=(0, 4))
-            self.tab_buttons[group] = button
+            button = tk.Label(groups, text=title, compound="left", bg=BG, fg=TEXT, font=(FONT, 9, "bold"),
+                              padx=6, cursor="hand2")
+            button.pack(side="left", padx=(0, 8))
+            button.bind("<Button-1>", lambda _e, g=group: self._toggle_group(g))
+            Tip(button, f"{title}: {hint}")
+            self.group_buttons[group] = (button, title)
 
-        header = tk.Frame(body, bg=BG, padx=1)
-        header.pack(fill="x")
-        self._columns(header)
-        for column, text in enumerate(("ПАРАМЕТР", "МАЄ БУТИ", "ДОПУСК", "У ПОЛІТНИКУ", "")):
-            tk.Label(header, text=text, bg=BG, fg=FAINT, font=(FONT, 8, "bold"), anchor="w").grid(
-                row=0, column=column, sticky="w", pady=(0, 4))
-
-        holder = tk.Frame(body, bg=BG, highlightthickness=1, highlightbackground=LINE)
+        holder = tk.Frame(body, bg=LINE, padx=1, pady=1)
         holder.pack(fill="both", expand=True)
-        self.canvas = tk.Canvas(holder, bg=BG, highlightthickness=0, height=330, width=760)
-        scroll = ttk.Scrollbar(holder, orient="vertical", command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=scroll.set)
-        self.canvas.pack(side="left", fill="both", expand=True)
+        inner = tk.Frame(holder, bg=SURFACE)
+        inner.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(inner, columns=[c[0] for c in self.COLUMNS], show="headings", height=14,
+                                 style="Diff.Treeview", selectmode="extended")
+        for key, title, width in self.COLUMNS:
+            self.tree.heading(key, text=title, anchor="w")
+            self.tree.column(key, width=width, anchor="w", stretch=False)
+        self.tree.tag_configure("bad", foreground="#ff7b72")
+        self.tree.tag_configure("missing", foreground=WARN)
+        scroll = ttk.Scrollbar(inner, orient="vertical", command=self.tree.yview, style="Diff.Vertical.TScrollbar")
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
-        self.frames = {}
-        for group, _title, _hint in CHECK_GROUPS:
-            frame = tk.Frame(self.canvas, bg=BG)
-            self.frames[group] = frame
-        self.window_id = self.canvas.create_window(0, 0, anchor="nw", window=self.frames["servo"])
-        self.canvas.bind("<Configure>", lambda _e: self._sync_scroll())
-        self.bind_all("<MouseWheel>", self._wheel, add="+")
+        self.empty = tk.Label(inner, text="", bg=SURFACE, fg=MUTED, font=(FONT, 10), justify="center")
 
         actions = tk.Frame(body, bg=BG)
         actions.pack(fill="x", pady=(10, 0))
-        FlatButton(actions, "+ Додати", self._add_row, padx=12, pady=5, bg=SURFACE, fg=ACCENT,
-                   font=app.font_strong).pack(side="left")
-        FlatButton(actions, "Взяти з політника", self._take_current, padx=12, pady=5, bg=SURFACE,
-                   tip="Записати поточні значення з політника як еталон\n(для всіх рядків; у політнику нічого "
-                       "не змінюється)").pack(side="left", padx=(6, 0))
-        FlatButton(actions, "З .param файлу…", self._from_param_file, padx=12, pady=5, bg=SURFACE,
-                   tip="Взяти еталон з файлу параметрів Mission Planner\n(Config → Full Parameter List → Save)"
-                   ).pack(side="left", padx=(6, 0))
-        FlatButton(actions, "Експорт конфігу…", lambda: app._export_config(self), padx=12, pady=5,
-                   bg=SURFACE, tip="Зберегти назви серв, режими, відступи й перевірки у файл").pack(side="right")
-        FlatButton(actions, "Імпорт конфігу…", self._import, padx=12, pady=5, bg=SURFACE,
-                   tip="Завантажити конфіг з файлу").pack(side="right", padx=(0, 6))
-
-        bottom = tk.Frame(body, bg=BG)
-        bottom.pack(fill="x", pady=(14, 0))
-        self.hint = tk.Label(bottom, text="", bg=BG, fg=MUTED, font=(FONT, 9), anchor="w")
-        self.hint.pack(side="left")
-        FlatButton(bottom, "Зберегти", self._save, padx=16, pady=6, bg=SURFACE, fg=ACCENT,
+        FlatButton(actions, "Не звіряти вибрані", self._ignore_selected, padx=12, pady=5, bg=SURFACE,
+                   tip="Додати вибрані параметри до списку винятків\n(наприклад, калібровки, які різні на "
+                       "кожному політнику)").pack(side="left")
+        self.ignore_button = FlatButton(actions, "Винятки…", self._edit_ignore, padx=12, pady=5, bg=SURFACE,
+                                        tip="Параметри, які не звіряються (можна з *, напр. COMPASS_OFS*)")
+        self.ignore_button.pack(side="left", padx=(6, 0))
+        FlatButton(actions, "Закрити", self._close, padx=14, pady=5, bg=SURFACE, fg=ACCENT,
                    font=app.font_strong).pack(side="right")
-        FlatButton(bottom, "Закрити", self._close, padx=12, pady=6, bg=SURFACE).pack(side="right", padx=(0, 6))
+        FlatButton(actions, "Експорт конфігу…", lambda: app._export_config(self), padx=12, pady=5, bg=SURFACE,
+                   tip="Зберегти назви серв, режими, відступи, еталон і винятки у файл").pack(side="right",
+                                                                                          padx=(0, 6))
+        FlatButton(actions, "Імпорт конфігу…", lambda: app._import_config(self), padx=12, pady=5, bg=SURFACE,
+                   tip="Завантажити конфіг з файлу").pack(side="right", padx=(0, 6))
+        self.note = tk.Label(body, text="", bg=BG, fg=FAINT, font=(FONT, 8), anchor="w", justify="left")
+        self.note.pack(fill="x", pady=(8, 0))
 
-        self._load(app.config_data["checks"])
-        self._show_group("servo")
         self.update_live()
         app.update_idletasks()
         self.geometry(f"+{app.winfo_rootx() + 30}+{app.winfo_rooty() + 30}")
         self.after(10, lambda: dark_title_bar(self))
 
-    CHECK_COLUMNS = (200, 238, 74, 226, 30)
-
-    def _columns(self, frame):
-        for column, width in enumerate(self.CHECK_COLUMNS):
-            frame.columnconfigure(column, minsize=width)
-
-    # ---- рядки ---------------------------------------------------------------------------
-    def _load(self, checks):
-        for group in self.rows:
-            for row in self.rows[group]:
-                row["frame"].destroy()
-            self.rows[group] = []
-        for check in checks:
-            self._add_row(check["group"], check)
-        self._sync_scroll()
-
-    def _add_row(self, group=None, check=None):
-        group = group or self.group
-        frame = tk.Frame(self.frames[group], bg=BG, pady=3)
-        frame.pack(fill="x")
-        self._columns(frame)
-        row = {"group": group, "frame": frame}
-        row["param"] = tk.StringVar(value=(check or {}).get("param", ""))
-        row["expected"] = tk.StringVar(value=(check or {}).get("expected", ""))
-        row["tolerance"] = tk.StringVar(value=(check or {}).get("tolerance", "0"))
-        if check is None and group in ("servo", "serial"):
-            used = {r["param"].get() for r in self.rows[group]}
-            free = [name for name in check_suggestions(group) if name not in used]
-            row["param"].set(free[0] if free else "")
-        param = ttk.Combobox(frame, textvariable=row["param"], values=check_suggestions(group), width=20)
-        param.grid(row=0, column=0, sticky="w")
-        expected = ttk.Combobox(frame, textvariable=row["expected"], values=check_choices(group), width=24)
-        expected.grid(row=0, column=1, sticky="w")
-        tolerance = ttk.Entry(frame, textvariable=row["tolerance"], width=7)
-        tolerance.grid(row=0, column=2, sticky="w")
-        if group in ("servo", "serial"):
-            tolerance.state(["disabled"])
-        row["current"] = tk.Label(frame, text="—", bg=BG, fg=FAINT, font=self.app.font_strong, anchor="w")
-        row["current"].grid(row=0, column=3, sticky="w")
-        FlatButton(frame, "×", lambda: self._remove_row(row), padx=6, pady=0, fg=FAINT,
-                   tip="Прибрати перевірку").grid(row=0, column=4)
-        for variable in (row["param"], row["expected"], row["tolerance"]):
-            variable.trace_add("write", lambda *_a: self.update_live())
-        self.rows[group].append(row)
-        self._sync_scroll()
-        self.update_live()
-        return row
-
-    def _remove_row(self, row):
-        row["frame"].destroy()
-        self.rows[row["group"]].remove(row)
-        self._sync_scroll()
-        self.update_live()
-
-    def _collect(self):
-        checks = []
-        for group, _title, _hint in CHECK_GROUPS:
-            for row in self.rows[group]:
-                checks.append({"group": group, "param": row["param"].get().strip().upper(),
-                               "expected": row["expected"].get().strip(),
-                               "tolerance": row["tolerance"].get().strip() or "0"})
-        return checks
-
-    # ---- вкладки й прокрутка ---------------------------------------------------------------
-    def _show_group(self, group):
-        self.group = group
-        self.canvas.itemconfigure(self.window_id, window=self.frames[group])
-        for key, button in self.tab_buttons.items():
-            count = len(self.rows[key])
-            title = next(title for g, title, _hint in CHECK_GROUPS if g == key)
-            button.configure(text=f"{title} · {count}" if count else title)
-            button.set_style(bg=RAISED if key == group else BG, fg=TEXT if key == group else MUTED)
-        self.canvas.yview_moveto(0)
-        self._sync_scroll()
-
-    def _sync_scroll(self):
-        frame = self.frames[self.group]
-        frame.update_idletasks()
-        self.canvas.configure(scrollregion=(0, 0, frame.winfo_reqwidth(), frame.winfo_reqheight()))
-
-    def _wheel(self, event):
-        try:
-            if str(event.widget).startswith(str(self)):
-                self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
-        except tk.TclError:
-            pass
-
-    # ---- живі значення -----------------------------------------------------------------------
+    # ---- показ ---------------------------------------------------------------------------------
     def update_live(self):
         app = self.app
-        late = app.link_ok and time.monotonic() - app.link_since > CHECK_MISSING_S
-        bad = ok = 0
-        for group, _title, _hint in CHECK_GROUPS:
-            for row in self.rows[group]:
-                param = row["param"].get().strip().upper()
-                expected = parse_number(row["expected"].get())
-                tolerance = abs(parse_number(row["tolerance"].get()) or 0.0)
-                value = app.params.get(param)
-                if not param or expected is None:
-                    text, color = "заповніть параметр і значення", WARN
-                elif not app.link_ok:
-                    text, color = "немає зв'язку", FAINT
-                elif value is None:
-                    text, color = ("✕ немає такого параметра?" if late else "читаю…"), (ERR if late else FAINT)
-                    bad += late
-                elif abs(value - expected) <= tolerance + 1e-6:
-                    text, color = f"✓ {value_label(group, value)}", OK
-                    ok += 1
-                else:
-                    text, color = f"✕ {value_label(group, value)}", ERR
-                    bad += 1
-                row["current"].configure(text=text, fg=color)
-        total = sum(len(rows) for rows in self.rows.values())
-        if not total:
-            self.summary.configure(text="Перевірок ще немає", fg=MUTED)
-        elif bad:
-            self.summary.configure(text=f"Щось не так: {bad}", fg=ERR)
-        elif ok == total:
-            self.summary.configure(text="✓ Налаштування OK", fg=OK)
+        reference = app.config_data["reference"]
+        result = app._compare()
+        count = len(reference["values"])
+        if count:
+            when = f" · {reference['time']}" if reference.get("time") else ""
+            self.reference_label.configure(text=f"{reference['name'] or 'без назви'} · {count} параметрів{when}",
+                                           fg=TEXT)
         else:
-            self.summary.configure(text=f"Перевірено {ok} з {total}", fg=MUTED)
-        dirty = clean_checks(self._collect()) != self.app.config_data["checks"]
-        self.hint.configure(text="Є незбережені зміни" if dirty else "", fg=WARN)
-        for key, button in self.tab_buttons.items():
-            count = len(self.rows[key])
-            title = next(title for g, title, _hint in CHECK_GROUPS if g == key)
-            button.configure(text=f"{title} · {count}" if count else title)
+            self.reference_label.configure(text="ще не завантажено — виберіть .param файл", fg=WARN)
+        if app.compare_file:
+            self.source_label.configure(text=f"файл {app.compare_file['name']} "
+                                             f"({len(app.compare_file['values'])} параметрів, без MP)")
+            self.source_button.configure(text="Назад до Mission Planner")
+            self.source_button.tip.text = "Знову звіряти з тим, що завантажив Mission Planner"
+        else:
+            self.source_label.configure(text="Mission Planner — " + app._snapshot_text())
+            self.source_button.configure(text="Порівняти з файлом…")
+            self.source_button.tip.text = ("Звірити еталон зі збереженим .param файлом\n"
+                                           "(наприклад, з іншого літака) — без Mission Planner")
+        diffs = result["diffs"] if result else []
+        per_group = {}
+        for diff in diffs:
+            per_group[diff[1]] = per_group.get(diff[1], 0) + 1
+        enabled = app.config_data["compare_groups"]
+        for group, (button, title) in self.group_buttons.items():
+            on = enabled.get(group, True)
+            bad = per_group.get(group, 0)
+            button.configure(image=app.img["check_on" if on else "check_off"],
+                             text=f" {title} · {bad}" if bad else f" {title}",
+                             fg=(ERR if bad else TEXT) if on else FAINT)
+        if result is None:
+            self.summary.configure(text="", fg=MUTED)
+        else:
+            self.summary.configure(text={"ok": "✓ Налаштування OK", "bad": f"✕ Відмінностей: {len(diffs)}"}.get(
+                result["state"], result["text"]), fg=result["color"])
+        signature = tuple(diffs)
+        if signature != self.signature:
+            self.signature = signature
+            selected = set(self.tree.selection())
+            self.tree.delete(*self.tree.get_children())
+            titles = {group: title for group, title, _hint in CHECK_GROUPS}
+            for name, group, expected, actual in diffs:
+                self.tree.insert("", "end", iid=name, tags=("missing" if actual is None else "bad",), values=(
+                    name, value_label(name, expected),
+                    "немає в політнику" if actual is None else value_label(name, actual), titles[group]))
+            self.tree.selection_set([name for name in selected if self.tree.exists(name)])
+        if diffs:
+            self.empty.place_forget()
+        else:
+            if result is None:
+                text = "Завантажте еталон — файл параметрів, з яким має збігатися політник."
+            elif result["state"] == "ok":
+                text = f"✓ Відмінностей немає\nзбігаються всі {result['checked']} параметрів еталона"
+            else:
+                text = result["details"]
+            self.empty.configure(text=text, fg=OK if result and result["state"] == "ok" else MUTED)
+            self.empty.place(relx=0.5, rely=0.55, anchor="center")
+        ignored = len(app.config_data["ignore"])
+        self.ignore_button.configure(text=f"Винятки · {ignored}…" if ignored else "Винятки…")
+        if result:
+            self.note.configure(text=f"Звіряється {result['checked']} з {count} параметрів еталона "
+                                     "(решта — у винятках або вимкнених розділах). Значення з комою "
+                                     "порівнюються з урахуванням округлення float.")
+        else:
+            self.note.configure(text="")
 
-    # ---- дії -----------------------------------------------------------------------------------
-    def _take_current(self):
-        rows = [row for rows in self.rows.values() for row in rows
-                if self.app.params.get(row["param"].get().strip().upper()) is not None]
-        if not rows:
-            messagebox.showinfo(APP_NAME, "Немає прочитаних значень — підключіться до політника\n"
-                                "й додайте рядки з параметрами.", parent=self)
-            return
-        if not messagebox.askyesno(APP_NAME, f"Записати поточні значення з політника як еталон для {len(rows)} "
-                                   "рядків?\n\n(Змінюється лише конфіг програми, політник — ні.)", parent=self):
-            return
-        for row in rows:
-            value = self.app.params[row["param"].get().strip().upper()]
-            row["expected"].set(value_label(row["group"], value))
-        self.update_live()
-
-    def _from_param_file(self):
-        path = filedialog.askopenfilename(parent=self, title="Файл параметрів Mission Planner",
+    # ---- дії ---------------------------------------------------------------------------------------
+    def _ask_param_file(self, title):
+        path = filedialog.askopenfilename(parent=self, title=title,
                                           filetypes=[("Параметри", "*.param *.parm *.txt"), ("Усі файли", "*.*")])
         if not path:
-            return
+            return None
         try:
             values = parse_param_file(Path(path).read_text(encoding="utf-8", errors="replace"))
         except OSError as exc:
             messagebox.showerror(APP_NAME, str(exc), parent=self)
-            return
-        patterns = {"servo": re.compile(r"^SERVO\d{1,2}_FUNCTION$"), "serial": re.compile(r"^SERIAL\d_PROTOCOL$"),
-                    "tuning": re.compile("^(" + "|".join(TUNING_PARAMS) + ")$")}
-        updated = added = 0
-        existing = {row["param"].get().strip().upper(): row for rows in self.rows.values() for row in rows}
-        for name, value in values.items():
-            if name in existing:
-                row = existing[name]
-                row["expected"].set(value_label(row["group"], value))
-                updated += 1
-                continue
-            group = next((g for g, pattern in patterns.items() if pattern.match(name)), None)
-            if group:
-                self._add_row(group, {"param": name, "expected": value_label(group, value), "tolerance": "0"})
-                added += 1
-        self._show_group(self.group)
-        messagebox.showinfo(APP_NAME, f"З файлу: оновлено {updated}, додано {added} перевірок\n"
-                            "(FUNCTION, PROTOCOL і PID). Перегляньте й натисніть «Зберегти».", parent=self)
-
-    def _import(self):
-        if self.app._import_config(self):
-            self._load(self.app.config_data["checks"])
-            self._show_group(self.group)
-
-    def _save(self):
-        checks = self._collect()
-        broken = [c["param"] or "(порожньо)" for c in checks
-                  if not CHECK_PARAM_RE.match(c["param"]) or parse_number(c["expected"]) is None]
-        if broken:
-            messagebox.showerror(APP_NAME, "Заповніть правильно (назва параметра й число):\n" + ", ".join(broken[:8]),
+            return None
+        if not values:
+            messagebox.showerror(APP_NAME, "У файлі немає параметрів (очікується «НАЗВА,ЗНАЧЕННЯ» у рядку).",
                                  parent=self)
+            return None
+        return {"name": Path(path).name, "values": values}
+
+    def _load_reference(self):
+        loaded = self._ask_param_file("Еталон — файл параметрів Mission Planner")
+        if loaded:
+            self.app._set_reference(loaded["name"], loaded["values"])
+            self.update_live()
+
+    def _take_from_mp(self):
+        snapshot = self.app.snapshot
+        if not self.app.plugin_live or not snapshot or not snapshot["values"]:
+            messagebox.showinfo(APP_NAME, "Немає даних з Mission Planner.\nПотрібен плагін (Налаштування → "
+                                "Mission Planner) і MP, підключений до політника.", parent=self)
             return
-        self.app._set_checks(checks)
-        self.app._log(f"Перевірки збережено: {len(checks)}", "ok")
+        if snapshot["total"] and snapshot["count"] < snapshot["total"]:
+            messagebox.showinfo(APP_NAME, "Mission Planner ще завантажує параметри — зачекайте.", parent=self)
+            return
+        if not messagebox.askyesno(APP_NAME, f"Зробити еталоном поточні {len(snapshot['values'])} параметрів "
+                                   "з Mission Planner?\n\nЗмінюється лише конфіг програми, політник — ні.",
+                                   parent=self):
+            return
+        self.app._set_reference(f"з Mission Planner (SYSID {snapshot['sysid']})", snapshot["values"])
         self.update_live()
 
+    def _toggle_source(self):
+        if self.app.compare_file:
+            self.app.compare_file = None
+        else:
+            self.app.compare_file = self._ask_param_file("Порівняти еталон з файлом параметрів")
+        self.app._update_checks_ui()
+
+    def _toggle_group(self, group):
+        groups = self.app.config_data["compare_groups"]
+        groups[group] = not groups.get(group, True)
+        self.app._save_later()
+        self.app._update_checks_ui()
+
+    def _ignore_selected(self):
+        names = list(self.tree.selection())
+        if not names:
+            messagebox.showinfo(APP_NAME, "Виберіть у списку параметри, які не треба звіряти.", parent=self)
+            return
+        self.app._set_ignore(self.app.config_data["ignore"] + names)
+
+    def _edit_ignore(self):
+        dialog = tk.Toplevel(self, bg=BG)
+        dialog.title("Винятки")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        frame = tk.Frame(dialog, bg=BG, padx=16, pady=14)
+        frame.pack(fill="both", expand=True)
+        tk.Label(frame, text="Ці параметри не звіряються", bg=BG, fg=TEXT, font=self.app.font_strong).pack(
+            anchor="w")
+        tk.Label(frame, text="По одному в рядку. * — будь-які символи (COMPASS_OFS* — усі офсети компаса).",
+                 bg=BG, fg=MUTED, font=(FONT, 9)).pack(anchor="w", pady=(2, 8))
+        text = tk.Text(frame, width=48, height=16, font=("Consolas", 10), bg=SURFACE, fg=TEXT, relief="flat",
+                       insertbackground=TEXT, highlightthickness=1, highlightbackground=LINE, padx=8, pady=6)
+        text.pack(fill="both", expand=True)
+        text.insert("1.0", "\n".join(self.app.config_data["ignore"]))
+        buttons = tk.Frame(frame, bg=BG)
+        buttons.pack(fill="x", pady=(10, 0))
+
+        def defaults():
+            text.delete("1.0", "end")
+            text.insert("1.0", "\n".join(DEFAULT_IGNORE))
+
+        def save():
+            self.app._set_ignore(clean_ignore(text.get("1.0", "end")))
+            dialog.destroy()
+
+        FlatButton(buttons, "За замовчуванням", defaults, padx=12, pady=5, bg=SURFACE).pack(side="left")
+        FlatButton(buttons, "Зберегти", save, padx=14, pady=5, bg=SURFACE, fg=ACCENT,
+                   font=self.app.font_strong).pack(side="right")
+        FlatButton(buttons, "Скасувати", dialog.destroy, padx=12, pady=5, bg=SURFACE).pack(side="right",
+                                                                                          padx=(0, 6))
+        dialog.geometry(f"+{self.winfo_rootx() + 60}+{self.winfo_rooty() + 40}")
+        dialog.after(10, lambda: dark_title_bar(dialog))
+        dialog.grab_set()
+
     def _close(self):
-        if clean_checks(self._collect()) != self.app.config_data["checks"]:
-            answer = messagebox.askyesnocancel(APP_NAME, "Зберегти зміни в перевірках?", parent=self)
-            if answer is None:
-                return
-            if answer:
-                self._save()
-        try:
-            self.unbind_all("<MouseWheel>")
-        except tk.TclError:
-            pass
         self.app.checks_window = None
         self.destroy()
 
@@ -1493,6 +1576,11 @@ class App(tk.Tk):
         self.link_since = 0.0
         self.next_checks_ui = 0.0
         self.checks_window = None
+        self.snapshot = None
+        self.snapshot_mtime = None
+        self.plugin_status = None
+        self.plugin_live = False
+        self.compare_file = None
         self._load_images()
         self._style()
         self._build()
@@ -1501,7 +1589,6 @@ class App(tk.Tk):
         if geometry.startswith("+"):
             self.geometry(geometry)
         self._send_rules()
-        self._send_watch()
         self._refresh_values()
         self.after(10, lambda: dark_title_bar(self))
         if self.config_data.get("overlay"):
@@ -1539,6 +1626,16 @@ class App(tk.Tk):
                             lightcolor=SURFACE, darkcolor=SURFACE, arrowcolor=MUTED, insertcolor=TEXT, padding=4)
             style.map(name, fieldbackground=[("readonly", SURFACE)], foreground=[("readonly", TEXT)],
                       bordercolor=[("focus", ACCENT)])
+        style.configure("Diff.Treeview", background=SURFACE, fieldbackground=SURFACE, foreground=TEXT,
+                        bordercolor=SURFACE, lightcolor=SURFACE, darkcolor=SURFACE, rowheight=26,
+                        font=(FONT, 10))
+        style.map("Diff.Treeview", background=[("selected", RAISED)], foreground=[("selected", TEXT)])
+        style.configure("Diff.Treeview.Heading", background=BG, foreground=FAINT, relief="flat",
+                        bordercolor=LINE, lightcolor=BG, darkcolor=BG, font=(FONT, 8, "bold"), padding=(6, 5))
+        style.map("Diff.Treeview.Heading", background=[("active", BG)])
+        style.configure("Diff.Vertical.TScrollbar", background=RAISED, troughcolor=SURFACE, bordercolor=SURFACE,
+                        lightcolor=RAISED, darkcolor=RAISED, arrowcolor=MUTED, gripcount=0)
+        style.map("Diff.Vertical.TScrollbar", background=[("active", LINE), ("disabled", SURFACE)])
         self.option_add("*TCombobox*Listbox.background", SURFACE)
         self.option_add("*TCombobox*Listbox.foreground", TEXT)
         self.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
@@ -1818,56 +1915,94 @@ class App(tk.Tk):
         except tk.TclError:
             self.overlay = None
 
-    def _send_watch(self):
-        names = sorted({check["param"] for check in self.config_data["checks"]})
-        self.worker.commands.put(("watch", names))
+    # ---- перевірка налаштувань: лише читання ------------------------------------------------
+    def _read_snapshot(self):
+        """Підхопити свіжу копію параметрів з Mission Planner (файл від плагіна). Політника ніхто не питає."""
+        self.plugin_status = plugin_runtime_status()
+        self.plugin_live = self.plugin_status is not None and self.plugin_status["age"] <= 8
+        path = Path(tempfile.gettempdir()) / SNAPSHOT_FILE
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = None
+        if mtime is None:
+            if not self.plugin_live:   # файл міняється атомарно — коротку відсутність перечікуємо
+                self.snapshot, self.snapshot_mtime = None, None
+            return
+        if mtime != self.snapshot_mtime:
+            snapshot = read_mp_snapshot(path)
+            if snapshot is not None:
+                self.snapshot, self.snapshot_mtime = snapshot, mtime
 
-    def _check_results(self):
-        """[(перевірка, поточне значення, стан)]; стан: ok · bad · missing · unknown."""
-        results = []
-        for check in self.config_data["checks"]:
-            value = self.params.get(check["param"])
-            expected = parse_number(check["expected"])
-            tolerance = abs(parse_number(check["tolerance"]) or 0.0)
-            if value is None:
-                late = self.link_ok and time.monotonic() - self.link_since > CHECK_MISSING_S
-                status = "missing" if late else "unknown"
-            else:
-                status = "ok" if abs(value - expected) <= tolerance + 1e-6 else "bad"
-            results.append((check, value, status))
-        return results
+    def _snapshot_text(self):
+        snapshot = self.snapshot
+        if not self.plugin_live:
+            if self.plugin_status is None:
+                return "немає даних: потрібен плагін (Налаштування → Mission Planner)"
+            return "немає даних: Mission Planner закритий або плагін не працює"
+        if "snapshot" not in self.plugin_status:
+            return "плагін старої версії — оновіть його в Налаштуваннях і перезапустіть MP"
+        if snapshot is None or not snapshot["values"]:
+            return "MP ще не завантажив параметри політника"
+        link = f"SYSID {snapshot['sysid']}" if snapshot["connected"] else "не підключений (останні завантажені)"
+        if snapshot["total"] and snapshot["count"] < snapshot["total"]:
+            return f"{link} · завантажує параметри {snapshot['count']} / {snapshot['total']}"
+        return f"{link} · {len(snapshot['values'])} параметрів"
+
+    def _compare(self):
+        """Звірка еталона: dict(state, text, color, details, diffs, checked) або None, якщо еталона немає."""
+        reference = self.config_data["reference"]["values"]
+        if not reference:
+            return None
+        ignore, groups = self.config_data["ignore"], self.config_data["compare_groups"]
+        checked = checked_count(reference, ignore, groups)
+        result = {"diffs": [], "checked": checked}
+        if self.compare_file:
+            current, complete, where = self.compare_file["values"], True, f"файлом {self.compare_file['name']}"
+        else:
+            snapshot = self.snapshot
+            if (not self.plugin_live or "snapshot" not in self.plugin_status or snapshot is None
+                    or not snapshot["values"]):
+                result.update(state="none", text="немає даних з MP", color=FAINT,
+                              details="Звіряти нема з чим: " + self._snapshot_text())
+                return result
+            if snapshot["total"] and snapshot["count"] < snapshot["total"]:
+                result.update(state="wait", text=f"завантаження {snapshot['count']}/{snapshot['total']}",
+                              color=MUTED, details="Mission Planner ще завантажує параметри політника")
+                return result
+            current, complete, where = snapshot["values"], True, "Mission Planner"
+        diffs = compare_params(reference, current, ignore, groups, complete)
+        result["diffs"] = diffs
+        if diffs:
+            lines = [f"? {name}: немає в політнику" if actual is None else
+                     f"✕ {name}: {value_label(name, actual)} (має бути {value_label(name, expected)})"
+                     for name, _group, expected, actual in diffs[:12]]
+            if len(diffs) > 12:
+                lines.append(f"…і ще {len(diffs) - 12}")
+            result.update(state="bad", text=f"Щось не так ({len(diffs)})", color=ERR, details="\n".join(lines))
+        else:
+            result.update(state="ok", text="OK", color=OK,
+                          details=f"Усі {checked} параметрів еталона збігаються з {where}")
+        return result
 
     def _checks_summary(self):
-        """(стан, текст, колір, подробиці) або None, якщо перевірок немає."""
-        results = self._check_results()
-        if not results:
+        """(стан, текст, колір, подробиці) для міні-вікна або None, якщо еталона немає."""
+        result = self._compare()
+        if result is None:
             return None
-        problems = []
-        for check, value, status in results:
-            if status == "bad":
-                problems.append(f"✕ {check['param']}: {value_label(check['group'], value)}"
-                                f" (має бути {value_label(check['group'], parse_number(check['expected']))})")
-            elif status == "missing":
-                problems.append(f"? {check['param']}: політник не відповідає (немає такого параметра?)")
-        if not self.link_ok:
-            return "none", "немає зв'язку", FAINT, "Перевірка почнеться після підключення"
-        if problems:
-            details = "\n".join(problems[:12]) + (f"\n…і ще {len(problems) - 12}" if len(problems) > 12 else "")
-            return "bad", f"Щось не так ({len(problems)})", ERR, details
-        if any(status == "unknown" for _c, _v, status in results):
-            return "wait", "перевіряю…", MUTED, "Читаю параметри з політника"
-        return "ok", "OK", OK, f"Усі {len(results)} перевірок збігаються"
+        return result["state"], result["text"], result["color"], result["details"]
 
     def _update_checks_ui(self):
         summary = self._checks_summary()
         if summary is None:
-            self.checks_button.configure(text="Перевірки")
+            self.checks_button.configure(text="Перевірка")
             self.checks_button.set_style(fg=MUTED)
-            self.checks_button.tip.text = "Перевірка налаштувань політника (лише читання)\nНаразі перевірок немає"
+            self.checks_button.tip.text = ("Перевірка налаштувань (лише читання)\n"
+                                           "Еталон ще не завантажено")
         else:
             state, text, color, details = summary
-            label = {"ok": "✓ Налаштування OK", "bad": f"✕ {text}", "wait": "Перевіряю…",
-                     "none": "Перевірки"}[state]
+            label = {"ok": "✓ Налаштування OK", "bad": f"✕ {text}", "wait": "Завантаження…",
+                     "none": "Перевірка"}[state]
             self.checks_button.configure(text=label)
             self.checks_button.set_style(fg=color)
             self.checks_button.tip.text = details
@@ -1901,16 +2036,23 @@ class App(tk.Tk):
                 return
             except tk.TclError:
                 self.checks_window = None
-        self.checks_window = ChecksWindow(self)
+        self._read_snapshot()
+        self.checks_window = CompareWindow(self)
 
-    def _set_checks(self, checks):
-        self.config_data["checks"] = clean_checks(checks)
-        self._send_watch()
-        self._update_checks_ui()
+    def _set_reference(self, name, values):
+        self.config_data["reference"] = clean_reference(
+            {"name": name, "values": values, "time": time.strftime("%d.%m.%Y %H:%M")})
+        self._log(f"Еталон: {name} · {len(self.config_data['reference']['values'])} параметрів", "ok")
         self._save_now()
+        self._update_checks_ui()
+
+    def _set_ignore(self, patterns):
+        self.config_data["ignore"] = clean_ignore(patterns)
+        self._save_now()
+        self._update_checks_ui()
 
     # ---- конфіг: експорт / імпорт ---------------------------------------------------------
-    EXPORT_KEYS = ("outputs", "checks", "low", "high", "only_disarmed", "auto", "step")
+    EXPORT_KEYS = ("outputs", "reference", "ignore", "compare_groups", "low", "high", "only_disarmed", "auto", "step")
 
     def _export_config(self, parent):
         path = filedialog.asksaveasfilename(
@@ -1926,8 +2068,8 @@ class App(tk.Tk):
             messagebox.showerror(APP_NAME, f"Не вдалося зберегти:\n{exc}", parent=parent)
             return
         self._log(f"Конфіг експортовано: {path}", "ok")
-        messagebox.showinfo(APP_NAME, "Конфіг збережено.\nНазви серв, режими, відступи й перевірки — у файлі.",
-                            parent=parent)
+        messagebox.showinfo(APP_NAME, "Конфіг збережено.\nНазви серв, режими, відступи, еталон і винятки — "
+                            "у файлі.", parent=parent)
 
     def _import_config(self, parent):
         path = filedialog.askopenfilename(parent=parent, title="Імпорт конфігу Servo Trim Sync",
@@ -1962,19 +2104,24 @@ class App(tk.Tk):
                 "mode": item.get("mode") if item.get("mode") in (MODE_OFFSETS, MODE_MIDDLE) else current["mode"],
             })
         if not messagebox.askyesno(
-                APP_NAME, f"Завантажити конфіг «{Path(path).name}»?\n\nЗамінить назви серв, режими, відступи "
-                          "й перевірки.\nЯкщо «Авто» увімкнено, MIN/MAX/TRIM вибраних SERVO6–10 будуть "
+                APP_NAME, f"Завантажити конфіг «{Path(path).name}»?\n\nЗамінить назви серв, режими, відступи, "
+                          "еталон і винятки.\nЯкщо «Авто» увімкнено, MIN/MAX/TRIM вибраних SERVO6–10 будуть "
                           "вирівняні за новими відступами.", parent=parent):
             return False
-        self.config_data.update({"outputs": outputs, "checks": clean_checks(data.get("checks")),
+        reference = (clean_reference(data["reference"]) if "reference" in data
+                     else checks_to_reference(data.get("checks")) or self.config_data["reference"])
+        self.config_data.update({"outputs": outputs, "reference": reference,
+                                 "ignore": clean_ignore(data["ignore"]) if "ignore" in data
+                                 else self.config_data["ignore"],
+                                 "compare_groups": clean_groups(data.get("compare_groups")),
                                  "low": low, "high": high,
                                  "only_disarmed": bool(data.get("only_disarmed", self.config_data["only_disarmed"])),
                                  "auto": bool(data.get("auto", self.config_data["auto"])),
                                  "step": data.get("step") if data.get("step") in STEPS else self.config_data["step"]})
         self._save_now()
         self._send_rules()
-        self._send_watch()
         self._update_controls()
+        self._update_checks_ui()
         self._refresh_values()
         self._log(f"Конфіг завантажено: {path}", "ok")
         return True
@@ -2420,9 +2567,11 @@ class App(tk.Tk):
         section(19, "ПЕРЕВІРКИ ТА КОНФІГ")
         checks_row = tk.Frame(body, bg=BG)
         checks_row.grid(row=20, column=0, columnspan=4, sticky="ew", pady=3)
-        count = len(self.config_data["checks"])
-        self._label(checks_row, f"Перевірок налаштувань: {count}. Лише читання й звірка —\n"
-                                "програма нічого не змінює в політнику.", MUTED, (FONT, 9), justify="left",
+        reference = self.config_data["reference"]
+        status = (f"Еталон: {reference['name'] or 'без назви'} · {len(reference['values'])} параметрів"
+                  if reference["values"] else "Еталон ще не завантажено")
+        self._label(checks_row, f"{status}.\nЛише читання й звірка — програма нічого не змінює в політнику.",
+                    MUTED, (FONT, 9), justify="left",
                     anchor="w").pack(side="left", fill="x", expand=True)
         FlatButton(checks_row, "Відкрити", lambda: (window.destroy(), self._open_checks()), padx=12, pady=5,
                    bg=SURFACE, fg=ACCENT, font=self.font_strong).pack(side="right")
@@ -2609,8 +2758,10 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         now = time.monotonic()
-        if self.config_data["checks"] and now >= self.next_checks_ui:
+        if now >= self.next_checks_ui:
             self.next_checks_ui = now + 1.0
+            if self.config_data["reference"]["values"] or self.checks_window is not None:
+                self._read_snapshot()
             self._update_checks_ui()
         if os.name == "nt" and self.connected_request and not self.link_ok and now >= self.next_mp_check:
             # Дві копії MP (стара «зависла» після перезапуску) — частa причина, чому даних немає.
