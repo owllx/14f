@@ -13,6 +13,7 @@ MAVLink Mirror на UDP 14551, якщо його ввімкнено.
 """
 
 import base64
+import csv
 import fnmatch
 import json
 import os
@@ -37,7 +38,7 @@ from pymavlink.dialects.v10 import ardupilotmega as _dialect_v10  # noqa: E402,F
 from pymavlink.dialects.v20 import ardupilotmega as _dialect_v20  # noqa: E402,F401
 
 APP_NAME = "Servo Trim Sync"
-APP_VERSION = "1.9.1"
+APP_VERSION = "1.10"
 CONFIG_DIR = Path(os.environ.get("APPDATA", tempfile.gettempdir())) / "ServoTrimSync"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 AUTO_SOURCE = "auto"
@@ -359,6 +360,114 @@ def checked_count(reference, ignore, groups):
     return sum(1 for name in reference if groups.get(param_group(name), True) and not is_ignored(name, ignore))
 
 
+# ---- GPS (лише читання потоку, який і так іде до Mission Planner) ------------------------------
+GPS_FIX_NAMES = {0: "NO GPS", 1: "NO FIX", 2: "2D FIX", 3: "3D FIX", 4: "DGPS", 5: "RTK FLOAT", 6: "RTK FIXED",
+                 7: "STATIC", 8: "PPP"}
+GPS_STALE_S = 5.0
+GPS_TEXT_S = 15.0
+GPS_GREEN_NOCAL = "nocal"   # зелене, коли GPS «not calibrated» (без фіксу / не готовий)
+GPS_GREEN_FIX = "fix"       # зелене, коли GPS має фікс
+
+
+def gps_status(gps, link_ok, now, green_when=GPS_GREEN_NOCAL):
+    """(колір-стан ok/bad/unknown, коротка мітка, подробиці) для GPS-віконця."""
+    fresh = now - gps.get("raw_time", 0.0) <= GPS_STALE_S
+    text_fresh = gps.get("text") and now - gps.get("text_time", 0.0) <= GPS_TEXT_S
+    if not link_ok or (not fresh and not text_fresh):
+        return "unknown", "—", "Немає даних GPS (програма не підключена до політника)"
+    fix = gps.get("fix") if fresh else None
+    calib_text = bool(text_fresh and "CALIB" in gps["text"].upper())
+    nocal = calib_text or fix is None or fix < 2 or gps.get("health") is False
+    if calib_text:
+        label = "NOT CALIBRATED"
+    elif fix is None:
+        label = "NO DATA"
+    elif fix < 2:
+        label = GPS_FIX_NAMES.get(fix, f"FIX {fix}")
+    else:
+        label = f"{GPS_FIX_NAMES.get(fix, f'FIX {fix}')} · {gps.get('sats', 0)}"
+    details = [f"Стан: {GPS_FIX_NAMES.get(fix, '—') if fix is not None else '—'}",
+               f"Супутників: {gps.get('sats', 0) if fresh else '—'}"]
+    if gps.get("health") is not None:
+        details.append("Датчик GPS: " + ("справний" if gps["health"] else "НЕ справний"))
+    if text_fresh:
+        details.append(f"Повідомлення: {gps['text']}")
+    green = nocal if green_when == GPS_GREEN_NOCAL else not nocal
+    return ("ok" if green else "bad"), label, "\n".join(details)
+
+
+# ---- журнал змін параметрів ----------------------------------------------------------------------
+JOURNAL_PATH = CONFIG_DIR / "param_changes.csv"
+JOURNAL_BASE_PATH = CONFIG_DIR / "param_base.json"
+JOURNAL_FIELDS = ("time", "sysid", "param", "old", "new", "who")
+JOURNAL_KEEP = 2000
+WHO_APP = "Servo Trim Sync"
+WHO_MP = "Mission Planner"
+WHO_OFFLINE = "поки програма була закрита"
+
+
+def load_journal(path=None, limit=JOURNAL_KEEP):
+    path = Path(path or JOURNAL_PATH)
+    try:
+        with path.open(encoding="utf-8-sig", newline="") as handle:
+            rows = [row for row in csv.DictReader(handle, delimiter=";") if row.get("param")]
+    except (OSError, csv.Error):
+        return []
+    return rows[-limit:]
+
+
+def append_journal(entries, path=None):
+    path = Path(path or JOURNAL_PATH)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        new = not path.exists() or path.stat().st_size == 0
+        with path.open("a", encoding="utf-8-sig" if new else "utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=JOURNAL_FIELDS, delimiter=";")
+            if new:
+                writer.writeheader()
+            writer.writerows(entries)
+    except OSError:
+        pass
+
+
+def journal_value(value):
+    if value in (None, ""):
+        return ""
+    try:
+        return f"{float(value):.7g}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def load_journal_base():
+    try:
+        data = json.loads(JOURNAL_BASE_PATH.read_text(encoding="utf-8"))
+        return {str(key): {str(n): float(v) for n, v in values.items()} for key, values in data.items()}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {}
+
+
+def save_journal_base(base):
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        temp = JOURNAL_BASE_PATH.with_suffix(".tmp")
+        temp.write_text(json.dumps(base), encoding="utf-8")
+        os.replace(temp, JOURNAL_BASE_PATH)
+    except OSError:
+        pass
+
+
+def journal_changes(base, values, who_for):
+    """Що змінилося між попередньою й новою таблицею: список записів журналу (без часу/SYSID)."""
+    entries = []
+    for name in sorted(set(base) | set(values)):
+        old, new = base.get(name), values.get(name)
+        if old is not None and new is not None and same_value(old, new):
+            continue
+        entries.append({"param": name, "old": journal_value(old), "new": journal_value(new), "who": who_for(name, new)})
+    return entries
+
+
 DEFAULT_CONFIG = {
     "config_version": CONFIG_VERSION,
     "connection": AUTO_SOURCE,
@@ -379,6 +488,9 @@ DEFAULT_CONFIG = {
     "reference": {"name": "", "values": {}, "time": ""},
     "ignore": list(DEFAULT_IGNORE),
     "compare_groups": {group: True for group, _title, _hint in CHECK_GROUPS},
+    "gps_badge": False,
+    "gps_badge_pos": "",
+    "gps_green": GPS_GREEN_NOCAL,
 }
 
 
@@ -428,6 +540,8 @@ def load_config():
             config["reference"] = checks_to_reference(data.get("checks"))
         config["ignore"] = clean_ignore(config.get("ignore")) if "ignore" in data else list(DEFAULT_IGNORE)
         config["compare_groups"] = clean_groups(config.get("compare_groups"))
+        if config.get("gps_green") not in (GPS_GREEN_NOCAL, GPS_GREEN_FIX):
+            config["gps_green"] = GPS_GREEN_NOCAL
         if int(data.get("config_version", 1)) < CONFIG_VERSION:
             # Старі версії підключалися лише через MAVLink Mirror — тепер «Автоматично».
             if config["connection"] in ("udpin:0.0.0.0:14551", "udpin:0.0.0.0:14550", ""):
@@ -819,6 +933,23 @@ class MavWorker(threading.Thread):
             name = name.rstrip("\x00")
             self.param_types[name] = message.param_type
             self._on_param(name, float(message.param_value))
+        elif kind == "GPS_RAW_INT":
+            # Лише читаємо те, що й так іде від політника до Mission Planner.
+            if self.link_ok and message.get_srcSystem() == self.target[0]:
+                self.emit("gps", "raw", int(message.fix_type), int(message.satellites_visible))
+        elif kind == "SYS_STATUS":
+            if self.link_ok and message.get_srcSystem() == self.target[0]:
+                bit = mavutil.mavlink.MAV_SYS_STATUS_SENSOR_GPS
+                if message.onboard_control_sensors_present & bit:
+                    self.emit("gps", "health", bool(message.onboard_control_sensors_health & bit), None)
+        elif kind == "STATUSTEXT":
+            if self.link_ok and message.get_srcSystem() == self.target[0]:
+                text = message.text
+                if isinstance(text, bytes):
+                    text = text.decode(errors="ignore")
+                text = text.rstrip("\x00").strip()
+                if "GPS" in text.upper():
+                    self.emit("gps", "text", text, None)
 
     def _on_param(self, name, value):
         previous = self.params.get(name)
@@ -917,6 +1048,7 @@ class MavWorker(threading.Thread):
             self.log(f"Заблоковано: {name} — програма змінює лише MIN/TRIM/MAX SERVO6–10", "error")
             return
         self.pending[name] = {"value": float(value), "attempts": 0, "next": 0.0}
+        self.emit("wrote", name, float(value))
         self.log(f"Записую {name} = {value}")
         self._retry_writes(time.monotonic())
 
@@ -1550,6 +1682,195 @@ class CompareWindow(tk.Toplevel):
         self.destroy()
 
 
+class GpsBadge(tk.Toplevel):
+    """Крихітне віконце поверх усіх: GPS. Колір — за вибраним правилом (за замовчуванням зелене = not calibrated)."""
+
+    def __init__(self, app):
+        super().__init__(app, bg=LINE)
+        self.app = app
+        self.drag = None
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        try:
+            self.attributes("-alpha", 0.96)
+        except tk.TclError:
+            pass
+        self.box = tk.Frame(self, bg=RAISED, padx=9, pady=3)
+        self.box.pack(fill="both", expand=True, padx=1, pady=1)
+        self.name = tk.Label(self.box, text="GPS", bg=RAISED, fg=MUTED, font=(FONT, 10, "bold"))
+        self.name.pack(side="left")
+        self.state = tk.Label(self.box, text="—", bg=RAISED, fg=MUTED, font=(FONT, 7, "bold"))
+        self.state.pack(side="left", padx=(6, 0), pady=(2, 0))
+        self.tip = Tip(self.box, "")
+        self.menu = tk.Menu(self, tearoff=False, bg=SURFACE, fg=TEXT, activebackground=RAISED,
+                            activeforeground=TEXT, bd=0)
+        self.green = tk.StringVar(value=app.config_data["gps_green"])
+        self.menu.add_radiobutton(label="Зелене, коли GPS not calibrated (без фіксу)", variable=self.green,
+                                  value=GPS_GREEN_NOCAL, command=self._set_green)
+        self.menu.add_radiobutton(label="Зелене, коли GPS має фікс", variable=self.green, value=GPS_GREEN_FIX,
+                                  command=self._set_green)
+        self.menu.add_separator()
+        self.menu.add_command(label="Відкрити Servo Trim Sync", command=app._show_main)
+        self.menu.add_command(label="Сховати GPS-віконце", command=app._toggle_gps_badge)
+        for widget in (self, self.box, self.name, self.state):
+            widget.bind("<ButtonPress-1>", self._press)
+            widget.bind("<B1-Motion>", self._move)
+            widget.bind("<ButtonRelease-1>", self._release)
+            widget.bind("<Double-Button-1>", lambda _e: app._show_main())
+            widget.bind("<Button-3>", self._popup)
+        position = str(app.config_data.get("gps_badge_pos") or "")
+        if position.startswith("+"):
+            self.geometry(position)
+        else:
+            self.update_idletasks()
+            self.geometry(f"+{max(0, self.winfo_screenwidth() - 190)}+{40}")
+
+    def _popup(self, event):
+        try:
+            self.menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.menu.grab_release()
+
+    def _set_green(self):
+        self.app.config_data["gps_green"] = self.green.get()
+        self.app._save_later()
+        self.app._update_gps_ui()
+
+    def _press(self, event):
+        self.drag = (event.x_root - self.winfo_x(), event.y_root - self.winfo_y())
+
+    def _move(self, event):
+        if self.drag:
+            self.geometry(f"+{event.x_root - self.drag[0]}+{event.y_root - self.drag[1]}")
+
+    def _release(self, _event):
+        if self.drag:
+            self.drag = None
+            self.app.config_data["gps_badge_pos"] = f"+{self.winfo_x()}+{self.winfo_y()}"
+            self.app._save_later()
+
+    def show(self, state, label, details):
+        bg = {"ok": "#238636", "bad": "#b62324"}.get(state, RAISED)
+        fg = "#ffffff" if state in ("ok", "bad") else MUTED
+        for widget in (self.box, self.name, self.state):
+            widget.configure(bg=bg)
+        self.name.configure(fg=fg)
+        self.state.configure(fg=fg, text=label)
+        rule = ("зелене = not calibrated (без фіксу)" if self.app.config_data["gps_green"] == GPS_GREEN_NOCAL
+                else "зелене = є фікс")
+        self.tip.text = f"{details}\n\nПравило: {rule}\nПравий клік — налаштування, перетягуйте мишею"
+
+
+class JournalWindow(tk.Toplevel):
+    """Журнал змін параметрів: що й коли змінилося в політнику (за даними Mission Planner). Лише читання."""
+
+    COLUMNS = (("time", "ЧАС", 168), ("sysid", "SYSID", 56), ("param", "ПАРАМЕТР", 170), ("old", "БУЛО", 130),
+               ("new", "СТАЛО", 130), ("who", "ХТО ЗМІНИВ", 186))
+
+    def __init__(self, app):
+        super().__init__(app, bg=BG)
+        self.app = app
+        self.version = None
+        self.title("Журнал змін параметрів")
+        self.resizable(False, False)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        body = tk.Frame(self, bg=BG, padx=18, pady=14)
+        body.pack(fill="both", expand=True)
+        top = tk.Frame(body, bg=BG)
+        top.pack(fill="x")
+        titles = tk.Frame(top, bg=BG)
+        titles.pack(side="left")
+        tk.Label(titles, text="Журнал змін параметрів", bg=BG, fg=TEXT, font=app.font_title).pack(anchor="w")
+        tk.Label(titles, text="Що й коли змінилося в політнику — за таблицею, яку завантажив Mission Planner. "
+                              "Лише читання.", bg=BG, fg=MUTED, font=(FONT, 9)).pack(anchor="w")
+        self.count = tk.Label(top, text="", bg=BG, fg=MUTED, font=app.font_strong)
+        self.count.pack(side="right")
+
+        search = tk.Frame(body, bg=BG)
+        search.pack(fill="x", pady=(12, 8))
+        tk.Label(search, text="ПОШУК", bg=BG, fg=FAINT, font=(FONT, 8, "bold")).pack(side="left", padx=(0, 8))
+        self.filter = tk.StringVar()
+        entry = ttk.Entry(search, textvariable=self.filter, width=28)
+        entry.pack(side="left")
+        self.filter.trace_add("write", lambda *_a: self.update_live(force=True))
+        self.state = tk.Label(search, text="", bg=BG, fg=FAINT, font=(FONT, 9))
+        self.state.pack(side="right")
+
+        holder = tk.Frame(body, bg=LINE, padx=1, pady=1)
+        holder.pack(fill="both", expand=True)
+        inner = tk.Frame(holder, bg=SURFACE)
+        inner.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(inner, columns=[c[0] for c in self.COLUMNS], show="headings", height=16,
+                                 style="Diff.Treeview", selectmode="extended")
+        for key, title, width in self.COLUMNS:
+            self.tree.heading(key, text=title, anchor="w")
+            self.tree.column(key, width=width, anchor="w", stretch=False)
+        self.tree.tag_configure("app", foreground=MUTED)
+        self.tree.tag_configure("mp", foreground=TEXT)
+        self.tree.tag_configure("offline", foreground=WARN)
+        scroll = ttk.Scrollbar(inner, orient="vertical", command=self.tree.yview, style="Diff.Vertical.TScrollbar")
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.empty = tk.Label(inner, text="", bg=SURFACE, fg=MUTED, font=(FONT, 10), justify="center")
+
+        actions = tk.Frame(body, bg=BG)
+        actions.pack(fill="x", pady=(10, 0))
+        FlatButton(actions, "Відкрити файл (CSV)", self._open_file, padx=12, pady=5, bg=SURFACE,
+                   tip=f"Повний журнал: {JOURNAL_PATH}\nВідкривається в Excel").pack(side="left")
+        FlatButton(actions, "Очистити", self._clear, padx=12, pady=5, bg=SURFACE,
+                   tip="Стерти записи журналу (у політнику нічого не змінюється)").pack(side="left", padx=(6, 0))
+        FlatButton(actions, "Закрити", self._close, padx=14, pady=5, bg=SURFACE, fg=ACCENT,
+                   font=app.font_strong).pack(side="right")
+        self.update_live()
+        app.update_idletasks()
+        self.geometry(f"+{app.winfo_rootx() + 40}+{app.winfo_rooty() + 40}")
+        self.after(10, lambda: dark_title_bar(self))
+
+    def update_live(self, force=False):
+        app = self.app
+        self.state.configure(text="Стежу за змінами · " + app._snapshot_text()
+                             if app.plugin_live else "Немає даних з Mission Planner — потрібен плагін")
+        if not force and self.version == app.journal_version:
+            return
+        self.version = app.journal_version
+        query = self.filter.get().strip().upper()
+        rows = [row for row in reversed(app.journal) if not query or query in row["param"].upper()]
+        self.tree.delete(*self.tree.get_children())
+        for row in rows:
+            tag = "app" if row.get("who") == WHO_APP else "offline" if row.get("who") == WHO_OFFLINE else "mp"
+            self.tree.insert("", "end", tags=(tag,), values=(
+                row.get("time", ""), row.get("sysid", ""), row["param"],
+                value_label(row["param"], row["old"]) if row.get("old") not in (None, "") else "(не було)",
+                value_label(row["param"], row["new"]) if row.get("new") not in (None, "") else "(зник)",
+                row.get("who", "")))
+        self.count.configure(text=f"Записів: {len(app.journal)}" if app.journal else "")
+        if rows:
+            self.empty.place_forget()
+        else:
+            self.empty.configure(text="Змін поки не було." if not query else "Нічого не знайдено.")
+            self.empty.place(relx=0.5, rely=0.55, anchor="center")
+
+    def _open_file(self):
+        if not JOURNAL_PATH.exists():
+            messagebox.showinfo(APP_NAME, "Журнал поки порожній.", parent=self)
+            return
+        try:
+            os.startfile(str(JOURNAL_PATH))  # type: ignore[attr-defined]
+        except (AttributeError, OSError):
+            messagebox.showinfo(APP_NAME, f"Файл журналу:\n{JOURNAL_PATH}", parent=self)
+
+    def _clear(self):
+        if not messagebox.askyesno(APP_NAME, "Стерти всі записи журналу змін?\n\n(У політнику нічого не "
+                                   "змінюється.)", parent=self):
+            return
+        self.app._clear_journal()
+
+    def _close(self):
+        self.app.journal_window = None
+        self.destroy()
+
+
 class App(tk.Tk):
     """Панель для шести виходів SERVO: MIN = TRIM − відступ, MAX = TRIM + відступ."""
 
@@ -1584,6 +1905,15 @@ class App(tk.Tk):
         self.plugin_status = None
         self.plugin_live = False
         self.compare_file = None
+        self.gps = {"fix": None, "sats": 0, "raw_time": 0.0, "health": None, "text": "", "text_time": 0.0}
+        self.gps_badge = None
+        self.recent_writes = {}
+        self.journal = load_journal()
+        self.journal_base = load_journal_base()
+        self.journal_mtime = None
+        self.journal_seen = set()
+        self.journal_version = 0
+        self.journal_window = None
         self._load_images()
         self._style()
         self._build()
@@ -1596,6 +1926,8 @@ class App(tk.Tk):
         self.after(10, lambda: dark_title_bar(self))
         if self.config_data.get("overlay"):
             self.after(300, self._toggle_overlay)
+        if self.config_data.get("gps_badge"):
+            self.after(350, self._toggle_gps_badge)
         self.after(50, self._poll_events)
         if self.config_data.get("autoconnect"):
             self.after(400, self._toggle_connection)
@@ -1685,6 +2017,9 @@ class App(tk.Tk):
                                         pady=5, bg=SURFACE, hover_bg=RAISED, fg=MUTED,
                                         tip="Перевірка налаштувань політника (лише читання)")
         self.checks_button.pack(side="right", padx=(0, 6))
+        self.gps_button = FlatButton(head, "● GPS", self._toggle_gps_badge, font=self.font_strong, padx=10, pady=5,
+                                     bg=SURFACE, hover_bg=RAISED, fg=FAINT, tip=" ")
+        self.gps_button.pack(side="right", padx=(0, 6))
         self.armed_label = self._label(head, "", ERR, (FONT, 9, "bold"))
         self.armed_label.pack(side="right", padx=(0, 10))
         self._line(self)
@@ -1746,6 +2081,11 @@ class App(tk.Tk):
         self.log_button = FlatButton(line, "журнал", self._toggle_log, font=(FONT, 8, "underline"), padx=2, pady=0,
                                      fg=MUTED, hover_bg=BG, hover_fg=ACCENT)
         self.log_button.pack(side="left")
+        self.journal_button = FlatButton(line, f"зміни параметрів · {len(self.journal)}" if self.journal
+                                         else "зміни параметрів", self._open_journal, font=(FONT, 8, "underline"),
+                                         padx=2, pady=0, fg=MUTED, hover_bg=BG, hover_fg=ACCENT,
+                                         tip="Журнал змін параметрів політника (що, коли, хто)")
+        self.journal_button.pack(side="left", padx=(8, 0))
 
         self.log_frame = tk.Frame(self, bg=BG, padx=18)
         self.log_text = tk.Text(self.log_frame, height=7, width=1, font=("Consolas", 9), relief="flat",
@@ -1917,6 +2257,109 @@ class App(tk.Tk):
             self.overlay.show(*self._overlay_args())
         except tk.TclError:
             self.overlay = None
+
+    # ---- GPS-віконце ------------------------------------------------------------------------------
+    def _toggle_gps_badge(self):
+        if self.gps_badge is not None:
+            try:
+                self.config_data["gps_badge_pos"] = f"+{self.gps_badge.winfo_x()}+{self.gps_badge.winfo_y()}"
+                self.gps_badge.destroy()
+            except tk.TclError:
+                pass
+            self.gps_badge = None
+            self.config_data["gps_badge"] = False
+        else:
+            self.gps_badge = GpsBadge(self)
+            self.config_data["gps_badge"] = True
+        self._update_gps_ui()
+        self._save_later()
+
+    def _update_gps_ui(self):
+        state, label, details = gps_status(self.gps, self.link_ok, time.monotonic(), self.config_data["gps_green"])
+        color = {"ok": OK, "bad": ERR}.get(state, FAINT)
+        on = self.gps_badge is not None
+        self.gps_button.configure(text="● GPS")
+        self.gps_button.set_style(fg=color, bg=RAISED if on else SURFACE)
+        self.gps_button.tip.text = (f"GPS: {label}\n{details}\n\n"
+                                    + ("Сховати GPS-віконце" if on else "Показати маленьке GPS-віконце поверх усіх"))
+        if on:
+            try:
+                self.gps_badge.show(state, label, details)
+            except tk.TclError:
+                self.gps_badge = None
+
+    # ---- журнал змін параметрів -----------------------------------------------------------------
+    def _journal_update(self):
+        """Порівнює свіжу копію таблиці MP з попередньою й записує, що змінилося. Політника не питає."""
+        snapshot = self.snapshot
+        if not self.plugin_live or not snapshot or not snapshot["values"] or snapshot["mtime"] == self.journal_mtime:
+            return
+        if snapshot["total"] and snapshot["count"] < snapshot["total"]:
+            return  # MP ще завантажує — неповну таблицю не порівнюємо
+        self.journal_mtime = snapshot["mtime"]
+        key, values = str(snapshot["sysid"]), snapshot["values"]
+        base = self.journal_base.get(key)
+        first = key not in self.journal_seen
+        self.journal_seen.add(key)
+        if not base:
+            self.journal_base[key] = dict(values)
+            save_journal_base(self.journal_base)
+            self._log(f"Журнал змін: запам'ятав {len(values)} параметрів SYSID {key}", "ok")
+            return
+        if sum(1 for name in base if name not in values) > len(base) // 2:
+            self._log(f"Журнал змін: SYSID {key} — зовсім інша таблиця (інший політник або прошивка), "
+                      "почав спочатку", "warn")
+            self.journal_base[key] = dict(values)
+            save_journal_base(self.journal_base)
+            return
+        now = time.monotonic()
+
+        def who(name, new):
+            if first:
+                return WHO_OFFLINE
+            wrote = self.recent_writes.get(name)
+            if wrote and new is not None and now - wrote[0] < 60 and same_value(new, wrote[1]):
+                return WHO_APP
+            return WHO_MP
+
+        entries = journal_changes(base, values, who)
+        self.journal_base[key] = dict(values)
+        save_journal_base(self.journal_base)
+        if not entries:
+            return
+        stamp = time.strftime("%d.%m.%Y %H:%M:%S")
+        for entry in entries:
+            entry.update(time=stamp, sysid=key)
+        append_journal(entries)
+        self.journal.extend(entries)
+        del self.journal[:-JOURNAL_KEEP]
+        self.journal_version += 1
+        names = ", ".join(entry["param"] for entry in entries[:4]) + ("…" if len(entries) > 4 else "")
+        others = [entry for entry in entries if entry["who"] != WHO_APP]
+        if others:
+            self._log(f"Змінено параметрів: {len(entries)} ({names})", "warn")
+        self.journal_button.configure(text=f"зміни параметрів · {len(self.journal)}")
+
+    def _open_journal(self):
+        if self.journal_window is not None:
+            try:
+                self.journal_window.deiconify()
+                self.journal_window.lift()
+                return
+            except tk.TclError:
+                self.journal_window = None
+        self.journal_window = JournalWindow(self)
+
+    def _clear_journal(self):
+        self.journal = []
+        self.journal_version += 1
+        try:
+            JOURNAL_PATH.unlink()
+        except OSError:
+            pass
+        self.journal_button.configure(text="зміни параметрів")
+        if self.journal_window is not None:
+            self.journal_window.update_live(force=True)
 
     # ---- перевірка налаштувань: лише читання ------------------------------------------------
     def _read_snapshot(self):
@@ -2781,14 +3224,30 @@ class App(tk.Tk):
                 elif kind == "param":
                     self.params[event[1]] = event[2]
                     refresh = True
+                elif kind == "wrote":
+                    self.recent_writes[event[1]] = (time.monotonic(), event[2])
+                elif kind == "gps":
+                    now = time.monotonic()
+                    if event[1] == "raw":
+                        self.gps.update(fix=event[2], sats=event[3], raw_time=now)
+                    elif event[1] == "health":
+                        self.gps["health"] = event[2]
+                    elif event[1] == "text":
+                        self.gps.update(text=event[2], text_time=now)
         except queue.Empty:
             pass
         now = time.monotonic()
         if now >= self.next_checks_ui:
             self.next_checks_ui = now + 1.0
-            if self.config_data["reference"]["values"] or self.checks_window is not None:
-                self._read_snapshot()
+            self._read_snapshot()
+            self._journal_update()
             self._update_checks_ui()
+            self._update_gps_ui()
+            if self.journal_window is not None:
+                try:
+                    self.journal_window.update_live()
+                except tk.TclError:
+                    self.journal_window = None
         if os.name == "nt" and self.connected_request and not self.link_ok and now >= self.next_mp_check:
             # Дві копії MP (стара «зависла» після перезапуску) — частa причина, чому даних немає.
             self.next_mp_check = now + 5.0
@@ -2821,6 +3280,11 @@ class App(tk.Tk):
         if self.overlay is not None:
             try:
                 self.config_data["overlay_pos"] = f"+{self.overlay.winfo_x()}+{self.overlay.winfo_y()}"
+            except tk.TclError:
+                pass
+        if self.gps_badge is not None:
+            try:
+                self.config_data["gps_badge_pos"] = f"+{self.gps_badge.winfo_x()}+{self.gps_badge.winfo_y()}"
             except tk.TclError:
                 pass
         save_config(self._collect_config())
