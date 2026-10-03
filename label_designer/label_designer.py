@@ -14,6 +14,7 @@ import json
 import math
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -3963,6 +3964,10 @@ class LabelDesigner(tk.Tk):
             setup_buttons, text="Налаштувати мережу", command=self._configure_network_printer,
             style="Tool.TButton",
         ).pack(side="left", fill="x", expand=True, padx=(5, 0))
+        ttk.Button(
+            printing, text="Зберегти драйвер з цього ПК (для іншого комп'ютера)…", command=self._export_driver,
+            style="Tool.TButton",
+        ).grid(row=7, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
         refresh_buttons = ttk.Frame(printing)
         refresh_buttons.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 4))
@@ -6913,13 +6918,98 @@ class LabelDesigner(tk.Tk):
         return "'" + str(value).replace("'", "''") + "'"
 
     @staticmethod
-    def _driver_inf_path():
+    def _looks_like_xprinter_inf(path):
+        try:
+            data = Path(path).read_bytes()[:400000].lower()
+        except OSError:
+            return False
+        return b"xprinter" in data or "xprinter".encode("utf-16-le") in data
+
+    @classmethod
+    def _driver_inf_candidates(cls):
+        """Де шукати драйвер: вбудований у exe, папка xprinter_driver поруч із програмою, сховище драйверів Windows."""
         resource_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-        bundled = resource_root / "xprinter_driver" / "Xprinter.inf"
-        if bundled.is_file():
-            return bundled
-        installed = Path(LOCAL_DRIVER_SOURCE) / "Xprinter.inf"
-        return installed if installed.is_file() else None
+        program_dir = (Path(sys.executable).resolve().parent if getattr(sys, "frozen", False)
+                       else Path(__file__).resolve().parent)
+        found = []
+        for folder in (resource_root / "xprinter_driver", program_dir / "xprinter_driver", program_dir):
+            try:
+                found += sorted(folder.glob("*.inf"))
+            except OSError:
+                pass
+        store = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "DriverStore" / "FileRepository"
+        try:
+            found += sorted(store.glob("xprinter*.inf_*/*.inf"))
+        except OSError:
+            pass
+        found.append(Path(LOCAL_DRIVER_SOURCE) / "Xprinter.inf")
+        result = []
+        for path in found:
+            if path.is_file() and path not in result and cls._looks_like_xprinter_inf(path):
+                result.append(path)
+        return result
+
+    @classmethod
+    def _driver_inf_path(cls):
+        candidates = cls._driver_inf_candidates()
+        return candidates[0] if candidates else None
+
+    def _ask_driver_inf(self):
+        """Драйвера на ПК немає — пояснюємо, як його перенести, і даємо вибрати .inf вручну."""
+        if not messagebox.askyesno(
+            "Драйвер",
+            "Драйвер Xprinter на цьому комп'ютері не знайдено.\n\n"
+            "Як перенести його зі старого ПК, де все працює:\n"
+            "1) На старому ПК у цій програмі натисніть «Зберегти драйвер з цього ПК»\n"
+            "    і виберіть флешку — з'явиться папка xprinter_driver.\n"
+            "2) На цьому ПК покладіть папку xprinter_driver поруч із XprinterLabelStudio.exe\n"
+            "    і знову натисніть «Встановити драйвер».\n\n"
+            "Або вкажіть файл драйвера (.inf) вручну — наприклад, з драйвера з сайту Xprinter.\n\n"
+            "Вибрати файл .inf зараз?",
+        ):
+            return None
+        path = filedialog.askopenfilename(
+            title="Файл драйвера Xprinter (.inf)",
+            filetypes=[("Драйвер (*.inf)", "*.inf"), ("Усі файли", "*.*")],
+        )
+        return Path(path) if path else None
+
+    def _export_driver(self):
+        """Зберігає встановлений драйвер Xprinter у папку xprinter_driver (щоб перенести на інший ПК)."""
+        source = None
+        if os.name == "nt":
+            script = (
+                "Get-PrinterDriver -ErrorAction SilentlyContinue | "
+                "Where-Object { $_.Name -match 'Xprinter|XP-420' -and $_.InfPath } | "
+                "Select-Object -First 1 -ExpandProperty InfPath"
+            )
+            try:
+                result = self._run_powershell(script, timeout=30)
+                inf = Path(result.stdout.strip()) if result.stdout.strip() else None
+                if inf and inf.is_file():
+                    source = inf
+            except Exception:
+                source = None
+        if source is None:
+            source = self._driver_inf_path()
+        if source is None:
+            messagebox.showerror("Драйвер", "На цьому комп'ютері драйвер Xprinter не знайдено.")
+            return
+        target = filedialog.askdirectory(title="Куди зберегти драйвер (наприклад, флешка)")
+        if not target:
+            return
+        destination = Path(target) / "xprinter_driver"
+        try:
+            shutil.copytree(source.parent, destination, dirs_exist_ok=True)
+        except OSError as exc:
+            messagebox.showerror("Драйвер", f"Не вдалося скопіювати драйвер:\n{exc}")
+            return
+        messagebox.showinfo(
+            "Драйвер",
+            f"Драйвер збережено:\n{destination}\n\n"
+            "На новому ПК покладіть папку xprinter_driver поруч із XprinterLabelStudio.exe\n"
+            "(або виберіть у ній файл .inf) і натисніть «Встановити драйвер».",
+        )
 
     @classmethod
     def _run_elevated_powershell(cls, script, timeout=300):
@@ -7115,9 +7205,8 @@ $items = @(
         return result == 0
 
     def _install_driver(self):
-        inf_path = self._driver_inf_path()
+        inf_path = self._driver_inf_path() or self._ask_driver_inf()
         if not inf_path:
-            messagebox.showerror("Драйвер", "Вбудований Xprinter.inf не знайдено")
             return
         if not messagebox.askyesno(
             "Встановлення драйвера",
@@ -7133,6 +7222,23 @@ $inf = {inf_literal}
 if ($LASTEXITCODE -ne 0) {{ throw "pnputil завершився з кодом $LASTEXITCODE" }}
 if (-not (Get-PrinterDriver -Name {driver_literal} -ErrorAction SilentlyContinue)) {{
     Add-PrinterDriver -Name {driver_literal}
+}}
+# Принтер по USB: якщо Windows сам не створив чергу з цим драйвером — робимо її.
+$printers = @(Get-Printer -ErrorAction SilentlyContinue)
+if (-not ($printers | Where-Object {{ $_.PortName -like 'USB*' -and $_.DriverName -eq {driver_literal} }})) {{
+    $existing = $printers | Where-Object {{ $_.PortName -like 'USB*' -and $_.Name -match 'Xprinter|XP-?420' }} |
+        Select-Object -First 1
+    if ($existing) {{
+        Set-Printer -Name $existing.Name -DriverName {driver_literal}
+    }} else {{
+        $used = @($printers | ForEach-Object {{ $_.PortName }})
+        $port = Get-PrinterPort -ErrorAction SilentlyContinue |
+            Where-Object {{ $_.Name -like 'USB*' -and $used -notcontains $_.Name }} |
+            Sort-Object Name -Descending | Select-Object -First 1
+        if ($port) {{
+            Add-Printer -Name 'Xprinter XP-420B (USB)' -DriverName {driver_literal} -PortName $port.Name
+        }}
+    }}
 }}
 '''
         self._run_admin_action("Встановлення драйвера", script)
